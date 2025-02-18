@@ -599,48 +599,117 @@ Comment:"""
         
         return filtered_lines
 
-    @lru_cache(maxsize=2000)  # Increased cache size
+    @lru_cache(maxsize=2000)
     def process_single_line(self, line):
-        """Process a single line and return the commented result"""
+        """Process assembly line with specific assembly knowledge"""
         try:
-            if not line:
-                return ''
-            if line.startswith('//'):
+            if not line or line.startswith('//'):
                 return line
             
-            # Try pattern matching first
-            comment = None
+            # Clean and parse the assembly line
+            stripped = line.strip()
+            if not stripped:
+                return line
             
-            # Check common patterns
-            first_word = line.split()[0] if line.split() else ''
-            if first_word in self.common_patterns['headers']:
-                comment = "Header directive"
-            elif first_word in self.common_patterns['keywords']:
-                comment = f"{first_word.capitalize()} statement"
-            elif first_word in self.common_patterns['types']:
-                comment = f"{first_word.capitalize()} type declaration"
-            elif first_word in self.common_patterns['common_funcs']:
-                comment = f"{first_word.capitalize()} function"
+            # Handle stack frame variable declarations
+            if '=' in stripped and 'ptr' in stripped:
+                match = re.match(r'(\w+)=\s*(\w+)\s+ptr\s+([^;\n]+)', stripped)
+                if match:
+                    var_name, var_type, offset = match.groups()
+                    
+                    # Determine variable size
+                    size_map = {
+                        'qword': '64-bit',
+                        'dword': '32-bit',
+                        'word': '16-bit',
+                        'byte': '8-bit'
+                    }
+                    size = next((size_map[k] for k in size_map if k in var_type.lower()), 'unknown-size')
+                    
+                    # Determine if it's a parameter or local variable
+                    if var_name.startswith('arg_'):
+                        offset_val = int(offset.strip('h'), 16) if 'h' in offset else int(offset)
+                        return f"{stripped:<40}// Input parameter #{offset_val//8} ({size})\n"
+                    else:
+                        # Local variable with negative offset from frame pointer
+                        offset_val = int(offset.strip('h'), 16) if 'h' in offset else int(offset)
+                        return f"{stripped:<40}// Local {size} variable at frame offset -{abs(offset_val)}h\n"
             
-            # Try regex patterns if no match
-            if not comment:
-                for pattern_name, pattern in self.code_patterns.items():
-                    match = pattern.search(line)
-                    if match:
-                        comment = self.generate_pattern_based_comment(line)
-                        break
+            # Handle common assembly instructions
+            parts = stripped.lower().split()
+            if not parts:
+                return line
             
-            # Use AI only if no pattern match and line is complex enough
-            if not comment and len(line) > 5:
-                comment = self.generate_ai_comment(line)
+            instruction = parts[0]
+            operands = ' '.join(parts[1:])
             
-            if comment:
-                return f"// {comment}\n{line}"
-            return line
-        
+            # Instruction-specific analysis
+            if instruction == 'mov':
+                if '[rsp' in operands or '[rbp' in operands:
+                    reg = operands.split(',')[1].strip()
+                    return f"{stripped:<40}// Save {reg} to stack frame\n"
+                elif 'rsp' in operands or 'rbp' in operands:
+                    return f"{stripped:<40}// Stack pointer/frame setup\n"
+                else:
+                    src = operands.split(',')[1].strip()
+                    dst = operands.split(',')[0].strip()
+                    return f"{stripped:<40}// Move {src} into {dst}\n"
+                
+            elif instruction == 'push':
+                reg = operands.strip()
+                return f"{stripped:<40}// Push {reg} onto stack\n"
+            
+            elif instruction == 'pop':
+                reg = operands.strip()
+                return f"{stripped:<40}// Pop value from stack into {reg}\n"
+            
+            elif instruction == 'sub':
+                if 'rsp' in operands:
+                    size = operands.split(',')[1].strip()
+                    size_val = int(size.strip('h'), 16) if 'h' in size else int(size)
+                    return f"{stripped:<40}// Allocate {size_val} bytes of stack space\n"
+                
+            elif instruction == 'add':
+                if 'rsp' in operands:
+                    size = operands.split(',')[1].strip()
+                    size_val = int(size.strip('h'), 16) if 'h' in size else int(size)
+                    return f"{stripped:<40}// Deallocate {size_val} bytes of stack space\n"
+                
+            elif instruction == 'call':
+                return f"{stripped:<40}// Call function {operands}\n"
+            
+            elif instruction == 'ret':
+                return f"{stripped:<40}// Return from function\n"
+            
+            elif instruction == 'test':
+                return f"{stripped:<40}// Compare {operands} against zero\n"
+            
+            elif instruction == 'cmp':
+                ops = operands.split(',')
+                return f"{stripped:<40}// Compare {ops[0].strip()} with {ops[1].strip()}\n"
+            
+            elif instruction in ['je', 'jz']:
+                return f"{stripped:<40}// Jump if equal/zero to {operands}\n"
+            
+            elif instruction in ['jne', 'jnz']:
+                return f"{stripped:<40}// Jump if not equal/nonzero to {operands}\n"
+            
+            elif instruction == 'jmp':
+                return f"{stripped:<40}// Unconditional jump to {operands}\n"
+            
+            elif instruction == 'lea':
+                dst, src = operands.split(',')
+                return f"{stripped:<40}// Load effective address of {src.strip()} into {dst.strip()}\n"
+            
+            elif instruction in ['and', 'or', 'xor']:
+                ops = operands.split(',')
+                return f"{stripped:<40}// Bitwise {instruction} of {ops[0].strip()} with {ops[1].strip()}\n"
+            
+            return f"{stripped}\n"
+            
         except Exception as e:
-            self.log_message(f"Error processing line: {str(e)}", error=True)
-            return line
+            self.log_message(f"Error analyzing instruction: {str(e)}", error=True)
+            return f"{stripped}\n"
 
     def toggle_pause(self):
         """Toggle pause state"""
@@ -656,135 +725,12 @@ Comment:"""
             self.progress['maximum'] = total_lines
             self.commented_text.delete(1.0, tk.END)
             
-            # Ultra-aggressive crypto detection patterns
-            crypto_patterns = {
-                'key_operations': [
-                    r'(?i)(key|keys|keygen|keygen|keymat)',
-                    r'(?i)(generate|gen|create|derive|init)',
-                    r'(?i)(schedule|expansion|setup)',
-                    r'(?i)(encrypt|decrypt|cipher)',
-                ],
-                'crypto_algorithms': [
-                    r'(?i)(aes|des|rc4|rc5|rc6|blowfish|twofish)',
-                    r'(?i)(sha|md5|md4|hash|digest|crc)',
-                    r'(?i)(rsa|dsa|ecc|curve|prime)',
-                    r'(?i)(random|rand|prng|nonce|salt)',
-                ],
-                'buffer_patterns': [
-                    r'\[(0x[0-9a-fA-F]+|\d+)\]',
-                    r'(memcpy|memset|memmove|memory)',
-                    r'(buffer|buf|ptr|pointer|array)',
-                    r'(malloc|alloc|free|new|delete)',
-                ],
-                'bit_operations': [
-                    r'(<<|>>|\^|\||\&|~)',
-                    r'(rol|ror|rotr|rotl|shift)',
-                    r'(xor|[^a-zA-Z]or[^a-zA-Z]|and)',
-                    r'(swap|mix|transform)',
-                ],
-                'suspicious_constants': [
-                    r'0x[0-9a-fA-F]{4,}',
-                    r'(?i)(16|32|64|128|256|512|1024)',
-                    r'(?i)(rounds|iterations|passes)',
-                    r'(?i)(size|length|bytes|bits)',
-                ],
-                'validation_patterns': [
-                    r'if.*((key|length|size).*(!|=|<|>))',
-                    r'return.*((NULL|0x[fF]+))',
-                    r'(check|verify|validate)',
-                    r'(error|status|result)',
-                ],
-                'security_measures': [
-                    r'(CRITICAL_SECTION|LOCK|MUTEX)',
-                    r'(SecureZeroMemory|ZeroMemory)',
-                    r'(memset.*0|clear)',
-                    r'(protect|secure|safe)',
-                ]
-            }
+            # Detect if this is assembly code
+            is_assembly = any(line.strip().startswith(('mov ', 'push ', 'pop ', 'lea ', 'sub ', 'add ')) 
+                             or '=' in line and 'ptr' in line 
+                             for line in lines[:20])
             
-            def is_likely_crypto(text):
-                """Quick check if text contains obvious crypto indicators"""
-                obvious_patterns = [
-                    r'(?i)(key|encrypt|decrypt|hash|crypt)',
-                    r'(?i)(random|generate|schedule|setup)',
-                    r'(?i)(aes|des|rc4|sha|md5|rsa)',
-                    r'(?i)(secure|protect|safe|verify)'
-                ]
-                return any(re.search(pattern, text) for pattern in obvious_patterns)
-            
-            def analyze_function_block(func_lines):
-                """Aggressive analysis of potential crypto functions"""
-                func_text = ''.join(func_lines)
-                evidence = []
-                score = 0
-                
-                # Quick initial check
-                if is_likely_crypto(func_text):
-                    score += 5
-                    evidence.append("Contains obvious crypto indicators")
-                
-                # Check all pattern categories
-                for category, patterns in crypto_patterns.items():
-                    category_matches = set()
-                    for pattern in patterns:
-                        matches = re.finditer(pattern, func_text, re.MULTILINE | re.IGNORECASE)
-                        for match in matches:
-                            category_matches.add(match.group())
-                
-                if category_matches:
-                    match_count = len(category_matches)
-                    if category in ['key_operations', 'crypto_algorithms']:
-                        score += match_count * 3
-                    elif category in ['buffer_patterns', 'suspicious_constants']:
-                        score += match_count * 2
-                    else:
-                        score += match_count
-                    evidence.append(f"{category}: {match_count} matches - {', '.join(list(category_matches)[:3])}")
-                
-                # Deep semantic analysis for any function with a minimum score
-                if score >= 2:  # Lower threshold for AI analysis
-                    try:
-                        prompt = f"""Analyze this code for cryptographic operations, especially key generation:
-
-{func_text}
-
-Key indicators to check:
-1. Key generation/handling
-2. Encryption/decryption
-3. Hash functions
-4. Random number generation
-5. Cryptographic algorithms
-6. Security operations
-
-Is this security-related code? List specific evidence."""
-
-                        inputs = self.tokenizer(prompt, return_tensors="pt", max_length=2048, truncation=True)
-                        if torch.cuda.is_available():
-                            inputs = {k: v.cuda() for k, v in inputs.items()}
-                        
-                        with torch.no_grad():
-                            outputs = self.model.generate(
-                                **inputs,
-                                max_new_tokens=200,
-                                temperature=0.3,
-                                do_sample=False
-                            )
-                            analysis = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
-                        
-                        if any(term in analysis.lower() for term in [
-                            'cryptographic', 'key generation', 'encryption',
-                            'security', 'hash function', 'random'
-                        ]):
-                            score += 5
-                            evidence.append("AI Analysis: Confirmed security/crypto functionality")
-                            
-                    except Exception as e:
-                        self.log_message(f"AI analysis error: {str(e)}", error=True)
-                
-                is_crypto = score >= 3  # Lower threshold for detection
-                return is_crypto, evidence, score
-            
-            # Process code in function blocks
+            # Initialize analysis state
             current_function = []
             in_function = False
             function_start_line = 0
@@ -796,7 +742,13 @@ Is this security-related code? List specific evidence."""
                     self.progress['value'] = (i / total_lines) * 100
                     self.root.update_idletasks()
                 
-                # More aggressive function detection
+                # Assembly code analysis
+                if is_assembly:
+                    commented_line = self.process_single_line(line)
+                    self.commented_text.insert(tk.END, commented_line)
+                    continue
+                
+                # High-level code analysis - detect function boundaries
                 if re.match(r'(?i)(\w+\s+)*(\w+)\s*\([^)]*\)\s*{', stripped):
                     in_function = True
                     function_start_line = i
@@ -806,7 +758,8 @@ Is this security-related code? List specific evidence."""
                 if in_function:
                     current_function.append(line)
                     if stripped == '}':
-                        is_crypto, evidence, score = analyze_function_block(current_function)
+                        # Analyze complete function for crypto/security patterns
+                        is_crypto, evidence, score = self.analyze_function_block(current_function)
                         
                         if is_crypto:
                             self.commented_text.insert(tk.END, "\n// ==========================================\n")
@@ -819,7 +772,7 @@ Is this security-related code? List specific evidence."""
                             
                             self.log_message(f"Found crypto/security function at line {function_start_line + 1}")
                         
-                        # Add commented function
+                        # Add commented function with crypto-specific comments if relevant
                         for func_line in current_function:
                             commented = self.add_crypto_specific_comment(func_line, is_crypto)
                             self.commented_text.insert(tk.END, commented)
@@ -830,11 +783,10 @@ Is this security-related code? List specific evidence."""
                         current_function = []
                         in_function = False
                 else:
+                    # Handle non-function code
                     self.commented_text.insert(tk.END, self.add_basic_comment(line))
             
             self.status_var.set("Analysis complete!")
-            
-            # Enable the Refine button after analysis
             self.refine_btn.config(state='normal')
             
         except Exception as e:
@@ -1012,7 +964,14 @@ Is this security-related code? List specific evidence."""
 
     def analyze_function_block(self, code_block):
         """Analyze and comment a function block with improved detection"""
-        lines = code_block.split('\n')
+        # Handle both string and list input
+        if isinstance(code_block, list):
+            code_text = ''.join(code_block)
+            lines = code_block
+        else:
+            code_text = code_block
+            lines = code_block.split('\n')
+        
         commented_lines = []
         
         # Key generation specific patterns - simplified and more focused
@@ -1028,10 +987,11 @@ Is this security-related code? List specific evidence."""
         # Simple scoring - if we match 2 or more patterns, it's likely key generation
         matches = []
         for name, pattern in key_indicators.items():
-            if pattern.search(code_block):
+            if pattern.search(code_text):
                 matches.append(name)
         
         is_key_gen = len(matches) >= 2
+        score = len(matches)
         
         # If we found key generation code, add the header BEFORE processing lines
         if is_key_gen:
@@ -1081,7 +1041,7 @@ Is this security-related code? List specific evidence."""
                 ""
             ])
         
-        return commented_lines
+        return is_key_gen, matches, score
 
     def deep_analyze_function(self, code_block):
         """Use AI model for thorough cryptographic analysis"""
@@ -1324,73 +1284,6 @@ Answer format: YES/NO followed by explanation of security-relevant features foun
         # Add save button
         save_btn = ttk.Button(btn_frame, text="Save Summary",
                              command=lambda: self._save_refined_findings(refined_text.get(1.0, tk.END)))
-        save_btn.pack(side=tk.RIGHT, padx=5)
-
-    def _extract_crypto_sections(self, content):
-        """Extract crypto function sections from the content"""
-        sections = []
-        current_section = []
-        in_section = False
-        
-        for line in content.split('\n'):
-            if "SECURITY/CRYPTO FUNCTION DETECTED" in line or "KEY GENERATION FUNCTION DETECTED" in line:
-                in_section = True
-                current_section = [line]
-            elif in_section:
-                current_section.append(line)
-                if "END SECURITY FUNCTION" in line or "END KEY GENERATION FUNCTION" in line:
-                    sections.append('\n'.join(current_section))
-                    in_section = False
-        
-        return sections
-
-    def _group_similar_sections(self, sections):
-        """Group similar crypto functions together"""
-        groups = {
-            'Key Generation': [],
-            'Encryption/Decryption': [],
-            'Hash Functions': [],
-            'Random Number Generation': [],
-            'CRC Implementation': [],
-            'Blowfish': [],
-            'Other Crypto': []
-        }
-        
-        for section in sections:
-            # Determine category based on content
-            if any(x in section.lower() for x in ['key gen', 'keygen', 'generate key']):
-                groups['Key Generation'].append(section)
-            elif any(x in section.lower() for x in ['encrypt', 'decrypt', 'cipher']):
-                groups['Encryption/Decryption'].append(section)
-            elif any(x in section.lower() for x in ['hash', 'sha', 'md5']):
-                groups['Hash Functions'].append(section)
-            elif any(x in section.lower() for x in ['random', 'rand', 'prng']):
-                groups['Random Number Generation'].append(section)
-            elif 'crc' in section.lower():
-                groups['CRC Implementation'].append(section)
-            elif 'blowfish' in section.lower():
-                groups['Blowfish'].append(section)
-            else:
-                groups['Other Crypto'].append(section)
-        
-        # Remove empty categories
-        return {k: v for k, v in groups.items() if v}
-
-    def _save_refined_findings(self, content):
-        """Save refined findings to a file"""
-        file_path = filedialog.asksaveasfilename(
-            defaultextension=".txt",
-            filetypes=[("Text files", "*.txt"), ("All files", "*.*")],
-            title="Save Refined Findings"
-        )
-        
-        if file_path:
-            try:
-                with open(file_path, 'w', encoding='utf-8') as f:
-                    f.write(content)
-                messagebox.showinfo("Success", "Refined findings saved successfully!")
-            except Exception as e:
-                messagebox.showerror("Error", f"Error saving file: {str(e)}")
 
 def main():
     root = tk.Tk()
