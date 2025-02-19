@@ -302,10 +302,18 @@ Comment:"""
 
     def _update_analyze_command(self):
         """Update analyze button command based on AI checkbox"""
-        if self.use_ai_var.get():
-            self.analyze_btn.config(command=self.analyze_with_deepseek)
+        if self.use_ai.get():
+            self.analyze_btn.config(
+                command=self.analyze_with_deepseek,
+                text="Analyze with AI"
+            )
+            self.log_message("Switched to AI-powered analysis mode")
         else:
-            self.analyze_btn.config(command=self.analyze_code)
+            self.analyze_btn.config(
+                command=self.analyze_code,
+                text="Analyze Code"
+            )
+            self.log_message("Switched to pattern-based analysis mode")
 
     def apply_settings(self):
         """Apply hardware configuration settings"""
@@ -2354,18 +2362,18 @@ Comments:"""
         return '\n'.join(commented_lines)
 
     def analyze_with_deepseek(self):
-        """Analyze code using DeepSeek model and check for crypto functions"""
+        """Analyze code using DeepSeek model with enhanced AI analysis"""
         try:
             content = self.original_text.get("1.0", tk.END)
             if not content.strip():
                 self.log_message("No code to analyze!", error=True)
                 return
                 
-            self.log_message("Starting combined analysis...")
+            self.log_message("Starting AI-powered analysis...")
             
-            # First do crypto analysis
+            # First do crypto analysis (keep this functionality)
             self.log_message("Running crypto analysis...")
-            self.evidence = []  # Reset evidence list
+            self.evidence = []
             processed_content = self.process_file(content)
             
             # Extract crypto findings
@@ -2374,7 +2382,7 @@ Comments:"""
                 self.log_message("Found potential crypto sections")
                 self._show_refinement_window(processed_content)
             
-            # Then do DeepSeek analysis
+            # Then do AI-powered analysis
             self.log_message("Starting DeepSeek analysis...")
             lines = content.split('\n')
             commented_lines = []
@@ -2386,18 +2394,7 @@ Comments:"""
                 if line.strip():
                     try:
                         # Use DeepSeek for each non-empty line
-                        prompt = f"""Explain this assembly/C code line technically:
-{line}
-
-Requirements:
-- Explain the exact operation being performed
-- Include register/memory/pointer operations
-- Describe bit manipulations if present
-- Format: code // technical explanation
-
-Example:
-*(uint *)(ptr + -0x10) = *(uint *)(ptr + -0x10) + 1; // Increment reference counter at negative offset from pointer
-"""
+                        prompt = self._create_comment_prompt(line)
                         
                         inputs = self.tokenizer(
                             prompt,
@@ -2418,18 +2415,16 @@ Example:
                             )
                         
                         comment = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+                        comment = self._clean_ai_comment(comment)
+                        commented_lines.append(f"{line:<40}// {comment}")
                         
-                        # Extract comment
-                        if '//' in comment:
-                            comment = comment.split('//')[-1].strip()
-                            comment = self._clean_comment(comment)
-                            commented_lines.append(f"{line:<40}// {comment}")
+                    except Exception as e:
+                        self.log_message(f"AI analysis failed for line {i+1}, falling back to pattern matching", warning=True)
+                        # Fall back to pattern matching if AI fails
+                        if pattern_comment := self._try_pattern_match(line):
+                            commented_lines.append(pattern_comment)
                         else:
                             commented_lines.append(line)
-                            
-                    except Exception as e:
-                        self.log_message(f"Error on line {i+1}: {str(e)}", error=True)
-                        commented_lines.append(line)
                 else:
                     commented_lines.append(line)
                     
@@ -2437,16 +2432,10 @@ Example:
             self.commented_text.delete("1.0", tk.END)
             self.commented_text.insert("1.0", '\n'.join(commented_lines))
             
-            # Add crypto findings summary if any
-            if self.evidence:
-                self.commented_text.insert(tk.END, "\n\n=== CRYPTO FINDINGS ===\n")
-                for item in self.evidence:
-                    self.commented_text.insert(tk.END, f"\n- {item}")
-            
-            self.log_message("Combined analysis complete!")
+            self.log_message("AI-powered analysis complete!")
             
         except Exception as e:
-            self.log_message(f"Analysis failed: {str(e)}", error=True)
+            self.log_message(f"AI analysis failed: {str(e)}", error=True)
             import traceback
             self.log_message(traceback.format_exc(), error=True)
 
