@@ -26,28 +26,60 @@ from tqdm import tqdm
 import gc
 import json
 from datetime import datetime
+import tempfile
+from typing import Optional, List
 
 class CodeCommenterGUI(tk.Frame):
     def __init__(self, root):
+        """Initialize the application"""
         super().__init__(root)
         self.root = root
-        self.grid(sticky='nsew')
+        self.root.title("DeepSeek Code Analyzer")
         
-        # Initialize variables before UI
-        self.use_gpu = tk.BooleanVar(value=True)
-        self.show_confidence = tk.BooleanVar(value=False)
-        self.is_analyzing = False
+        # Set initial window size
+        self.root.geometry("1800x1000")
+        
+        # Pack the main frame
+        self.pack(fill=tk.BOTH, expand=True)
+        
+        # Initialize variables
+        self.should_stop = False
         self.is_paused = False
-        self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        self.evidence = []
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
-        # Setup UI first
+        # Initialize prompts
+        self.prompts = {
+            'analyze_function': """Analyze this code for key generation or cryptographic operations:
+{code}
+Identify:
+1. Key generation routines
+2. Cryptographic operations
+3. Suspicious bit manipulations
+4. Encryption/decryption logic
+5. Hash functions
+6. Key schedules or S-boxes
+
+Provide a detailed analysis.""",
+            
+            'generate_comment': """Generate a technical comment for this code line:
+{code}
+Focus on:
+1. Purpose of the code
+2. Any security implications
+3. Cryptographic relevance
+4. Key operations
+
+Comment:"""
+        }
+        
+        # Setup UI first (this will create analyze_btn)
         self.setup_ui()
         
-        # Initialize logging
-        self.log_message("Initializing...")
-        
-        # Load models in background to prevent UI freeze
-        self.root.after(100, self.setup_models)
+        # Initialize model in background
+        self.model = None
+        self.tokenizer = None
+        threading.Thread(target=self.setup_models, daemon=True).start()
 
     def setup_models(self):
         """Initialize DeepSeek model for advanced code analysis"""
@@ -152,134 +184,128 @@ Comment:"""
 
     def setup_ui(self):
         """Setup the UI with consistent grid geometry management"""
-        # Top frame for file selection
-        file_frame = ttk.Frame(self)
-        file_frame.grid(row=0, column=0, columnspan=2, sticky='ew', padx=5, pady=5)
+        # Initialize checkbox variables
+        self.use_gpu_var = tk.BooleanVar(value=True)
+        self.show_confidence_var = tk.BooleanVar(value=False)
+        self.use_ai_var = tk.BooleanVar(value=False)  # Default to fast mode
         
-        ttk.Label(file_frame, text="Source File:").grid(row=0, column=0, padx=5)
+        # Configure main window grid
+        self.grid_rowconfigure(3, weight=1)
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_columnconfigure(1, weight=1)
+        self.grid_columnconfigure(2, weight=1)  # Add column for crypto findings
+        
+        # File selection frame
+        file_frame = ttk.Frame(self)
+        file_frame.grid(row=0, column=0, columnspan=3, sticky='ew', padx=5, pady=5)
+        
+        ttk.Label(file_frame, text="Source File:").pack(side=tk.LEFT, padx=5)
         self.file_path_var = tk.StringVar()
-        ttk.Entry(file_frame, textvariable=self.file_path_var).grid(row=0, column=1, sticky='ew', padx=5)
-        ttk.Button(file_frame, text="Browse", command=self.browse_file).grid(row=0, column=2, padx=5)
-        file_frame.grid_columnconfigure(1, weight=1)
+        ttk.Entry(file_frame, textvariable=self.file_path_var).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+        ttk.Button(file_frame, text="Browse", command=self.browse_file).pack(side=tk.LEFT, padx=5)
         
         # Settings frame
         settings_frame = ttk.LabelFrame(self, text="Settings")
         settings_frame.grid(row=1, column=0, columnspan=2, sticky='ew', padx=5, pady=5)
         
-        ttk.Checkbutton(settings_frame, text="Use GPU (if available)", variable=self.use_gpu).grid(row=0, column=0, padx=5, pady=2)
-        ttk.Checkbutton(settings_frame, text="Show confidence scores", variable=self.show_confidence).grid(row=0, column=1, padx=5, pady=2)
+        # Create a grid layout for settings
+        ttk.Checkbutton(settings_frame, text="Use GPU (if available)", 
+                        variable=self.use_gpu_var).grid(row=0, column=0, padx=5, pady=2)
+        ttk.Checkbutton(settings_frame, text="Show confidence scores", 
+                        variable=self.show_confidence_var).grid(row=0, column=1, padx=5, pady=2)
         
+        # Add AI checkbox in the same grid layout
+        self.use_ai_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(settings_frame, text="Use AI Analysis", 
+                        variable=self.use_ai_var,
+                        command=self._update_analyze_command).grid(row=0, column=2, padx=5, pady=2)
         
-        # Text areas with search
-        text_frame = ttk.Frame(self)
-        text_frame.grid(row=2, column=0, columnspan=2, sticky='nsew', padx=5, pady=5)
+        # Configure grid columns to expand evenly
+        settings_frame.grid_columnconfigure(0, weight=1)
+        settings_frame.grid_columnconfigure(1, weight=1)
+        settings_frame.grid_columnconfigure(2, weight=1)
         
-        # Original code section
-        original_frame = ttk.LabelFrame(text_frame, text="Original Code")
-        original_frame.grid(row=0, column=0, sticky='nsew', padx=5)
+        # Three panel frame
+        panels_frame = ttk.Frame(self)
+        panels_frame.grid(row=2, column=0, columnspan=3, sticky='nsew', padx=5, pady=5)
+        panels_frame.grid_columnconfigure(0, weight=1)
+        panels_frame.grid_columnconfigure(1, weight=1)
+        panels_frame.grid_columnconfigure(2, weight=1)
         
-        # Search for original code
-        original_search_frame = ttk.Frame(original_frame)
-        original_search_frame.grid(row=0, column=0, sticky='ew', padx=5, pady=2)
+        # Original code panel
+        original_frame = ttk.LabelFrame(panels_frame, text="Original Code")
+        original_frame.grid(row=0, column=0, sticky='nsew', padx=2)
         
-        self.original_search_var = tk.StringVar()
-        self.original_search_entry = ttk.Entry(original_search_frame, textvariable=self.original_search_var)
-        self.original_search_entry.grid(row=0, column=0, sticky='ew', padx=2)
+        # Search frame for original code
+        search_frame = ttk.Frame(original_frame)
+        search_frame.pack(fill=tk.X, padx=5, pady=2)
+        ttk.Entry(search_frame).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
+        ttk.Button(search_frame, text="Find").pack(side=tk.LEFT, padx=2)
+        ttk.Button(search_frame, text="Next").pack(side=tk.LEFT, padx=2)
         
-        ttk.Button(original_search_frame, text="Find", 
-                   command=lambda: self.find_text(self.original_text, self.original_search_var.get())).grid(row=0, column=1, padx=2)
-        ttk.Button(original_search_frame, text="Next",
-                   command=lambda: self.find_text(self.original_text, self.original_search_var.get(), next=True)).grid(row=0, column=2, padx=2)
-        original_search_frame.grid_columnconfigure(0, weight=1)
+        self.original_text = scrolledtext.ScrolledText(original_frame)
+        self.original_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
-        # Original text area
-        self.original_text = scrolledtext.ScrolledText(original_frame, height=20, width=60)
-        self.original_text.grid(row=1, column=0, sticky='nsew', padx=5, pady=5)
+        # Commented code panel
+        commented_frame = ttk.LabelFrame(panels_frame, text="Commented Code")
+        commented_frame.grid(row=0, column=1, sticky='nsew', padx=2)
         
-        # Commented code section
-        commented_frame = ttk.LabelFrame(text_frame, text="Commented Code")
-        commented_frame.grid(row=0, column=1, sticky='nsew', padx=5)
+        # Search frame for commented code
+        search_frame = ttk.Frame(commented_frame)
+        search_frame.pack(fill=tk.X, padx=5, pady=2)
+        ttk.Entry(search_frame).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
+        ttk.Button(search_frame, text="Find").pack(side=tk.LEFT, padx=2)
+        ttk.Button(search_frame, text="Next").pack(side=tk.LEFT, padx=2)
         
-        # Search for commented code
-        commented_search_frame = ttk.Frame(commented_frame)
-        commented_search_frame.grid(row=0, column=0, sticky='ew', padx=5, pady=2)
+        self.commented_text = scrolledtext.ScrolledText(commented_frame)
+        self.commented_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
-        self.commented_search_var = tk.StringVar()
-        self.commented_search_entry = ttk.Entry(commented_search_frame, textvariable=self.commented_search_var)
-        self.commented_search_entry.grid(row=0, column=0, sticky='ew', padx=2)
+        # Crypto findings panel
+        crypto_frame = ttk.LabelFrame(panels_frame, text="Crypto Findings")
+        crypto_frame.grid(row=0, column=2, sticky='nsew', padx=2)
+        self.crypto_text = scrolledtext.ScrolledText(crypto_frame)
+        self.crypto_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
-        ttk.Button(commented_search_frame, text="Find",
-                   command=lambda: self.find_text(self.commented_text, self.commented_search_var.get())).grid(row=0, column=1, padx=2)
-        ttk.Button(commented_search_frame, text="Next",
-                   command=lambda: self.find_text(self.commented_text, self.commented_search_var.get(), next=True)).grid(row=0, column=2, padx=2)
-        commented_search_frame.grid_columnconfigure(0, weight=1)
-        
-        # Commented text area
-        self.commented_text = scrolledtext.ScrolledText(commented_frame, height=20, width=60)
-        self.commented_text.grid(row=1, column=0, sticky='nsew', padx=5, pady=5)
-        
-        # Configure text frame weights
-        text_frame.grid_columnconfigure(0, weight=1)
-        text_frame.grid_columnconfigure(1, weight=1)
-        text_frame.grid_rowconfigure(0, weight=1)
-        
-        # Buttons frame
+        # Button frame
         button_frame = ttk.Frame(self)
         button_frame.grid(row=4, column=0, columnspan=2, sticky='ew', padx=5, pady=5)
         
-        self.analyze_btn = ttk.Button(button_frame, text="Analyze Code", command=self.analyze_code)
+        # Fix analyze button to use non-AI by default
+        self.analyze_btn = ttk.Button(
+            button_frame, 
+            text="Analyze Code", 
+            command=self.analyze_code  # Default to non-AI analysis
+        )
         self.analyze_btn.grid(row=0, column=0, padx=5)
         
-        self.save_btn = ttk.Button(button_frame, text="Save Output", command=self.save_output)
-        self.save_btn.grid(row=0, column=1, padx=5)
+        # Add AI checkbox
+        self.use_ai = tk.BooleanVar(value=False)
+        ai_check = ttk.Checkbutton(
+            settings_frame, 
+            text="Use AI Analysis", 
+            variable=self.use_ai,
+            command=self._update_analyze_command  # Add callback to update button command
+        )
+        ai_check.grid(row=0, column=2, padx=5, pady=2)
         
-        self.clear_btn = ttk.Button(button_frame, text="Clear", command=self.clear_all)
-        self.clear_btn.grid(row=0, column=2, padx=5)
+        self.crypto_btn = ttk.Button(button_frame, text="Find Crypto", command=self.analyze_crypto)
+        self.crypto_btn.grid(row=1, column=0, padx=5)
         
-        self.stop_btn = ttk.Button(button_frame, text="Stop", command=self.stop_analysis, state='disabled')
-        self.stop_btn.grid(row=0, column=3, padx=5)
+        ttk.Button(button_frame, text="Save Output", command=self.save_output).grid(row=1, column=1, padx=5)
+        ttk.Button(button_frame, text="Clear", command=self.clear_analysis).grid(row=2, column=0, columnspan=2, padx=5)
         
-        self.pause_btn = ttk.Button(button_frame, text="Pause", command=self.toggle_pause, state='disabled')
-        self.pause_btn.grid(row=0, column=4, padx=5)
-        
-        # Initialize Refine button in enabled state
-        self.refine_btn = ttk.Button(button_frame, text="Refine Findings", 
-                                    command=self.show_refined_findings,
-                                    state='normal')
-        self.refine_btn.grid(row=0, column=5, padx=5)
-        
-        # Progress bar and status
-        self.progress = ttk.Progressbar(self, mode='determinate')
-        self.progress.grid(row=5, column=0, columnspan=2, sticky='ew', padx=5, pady=5)
-        
-        self.status_var = tk.StringVar(value="Ready")
-        ttk.Label(self, textvariable=self.status_var).grid(row=6, column=0, columnspan=2, sticky='w', padx=5)
-        
-        # Add log text area
+        # Log frame
         log_frame = ttk.LabelFrame(self, text="Processing Log")
-        log_frame.grid(row=7, column=0, columnspan=2, sticky='nsew', padx=5, pady=5)
-        
-        self.log_text = scrolledtext.ScrolledText(log_frame, height=8, width=80)
-        self.log_text.grid(row=0, column=0, sticky='nsew', padx=5, pady=5)
-        log_frame.grid_columnconfigure(0, weight=1)
-        
-        # Configure grid weights
-        self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(3, weight=3)  # Text areas get more space
-        self.grid_rowconfigure(7, weight=1)  # Log area gets some space
-        
-        # Initialize the UI before loading models
-        self.root.update_idletasks()
+        log_frame.grid(row=3, column=0, columnspan=3, sticky='nsew', padx=5, pady=5)
+        self.log_text = scrolledtext.ScrolledText(log_frame, height=8)
+        self.log_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
-        # Bind Ctrl+F to focus appropriate search box
-        self.original_text.bind('<Control-f>', lambda e: self.focus_search(self.original_search_entry))
-        self.commented_text.bind('<Control-f>', lambda e: self.focus_search(self.commented_search_entry))
-        
-        # Bind Return in search boxes
-        self.original_search_entry.bind('<Return>', 
-                                      lambda e: self.find_text(self.original_text, self.original_search_var.get()))
-        self.commented_search_entry.bind('<Return>', 
-                                       lambda e: self.find_text(self.commented_text, self.commented_search_var.get()))
+    def _update_analyze_command(self):
+        """Update analyze button command based on AI checkbox"""
+        if self.use_ai_var.get():
+            self.analyze_btn.config(command=self.analyze_with_deepseek)
+        else:
+            self.analyze_btn.config(command=self.analyze_code)
 
     def apply_settings(self):
         """Apply hardware configuration settings"""
@@ -319,36 +345,18 @@ Comment:"""
         except Exception as e:
             self.log_message(f"Error applying settings: {str(e)}", error=True)
 
-    def log_message(self, message, error=False, warning=False, update_last=False):
-        """Log a message to the log text area"""
-        if not hasattr(self, 'log_text') or self.log_text is None:
-            print(f"Log: {message}")  # Fallback to console if log_text not available
-            return
-        
-        timestamp = datetime.now().strftime('[%H:%M:%S]')
-        if error:
-            log_entry = f"{timestamp} ERROR: {message}\n"
-            tag = 'error'
-        elif warning:
-            log_entry = f"{timestamp} WARNING: {message}\n"
-            tag = 'warning'
-        else:
-            log_entry = f"{timestamp} INFO: {message}\n"
-            tag = 'info'
-        
-        if update_last:
-            # Remove last line if updating
-            last_line = self.log_text.get("end-2c linestart", "end-1c")
-            if last_line.startswith(timestamp):
-                self.log_text.delete("end-2c linestart", "end-1c")
-        
-        self.log_text.insert(tk.END, log_entry)
-        self.log_text.tag_add(tag, f"end-{len(log_entry)+1}c", "end-1c")
-        self.log_text.tag_config('error', foreground='red')
-        self.log_text.tag_config('warning', foreground='orange')
-        self.log_text.tag_config('info', foreground='blue')
-        self.log_text.see(tk.END)
-        self.root.update_idletasks()
+    def log_message(self, message, error=False):
+        """Log a message to the log text widget"""
+        try:
+            timestamp = datetime.now().strftime("[%H:%M:%S]")
+            prefix = "ERROR: " if error else "INFO: "
+            log_message = f"{timestamp} {prefix}{message}\n"
+            
+            self.log_text.insert(tk.END, log_message)
+            self.log_text.see(tk.END)
+            self.update()
+        except Exception as e:
+            print(f"Error logging message: {str(e)}")
 
     def analyze_security_patterns(self, line):
         security_suggestions = []
@@ -474,41 +482,219 @@ Comment:"""
         
         return None
     
-    def generate_ai_comment(self, line):
+    def _generate_ai_comment(self, line):
+        """Generate AI-powered comment for code line"""
         try:
-            # Prepare input with proper attention mask
-            inputs = self.comment_tokenizer(
-                f"Explain this code line briefly: {line}\nComment:",
-                padding=True,
-                truncation=True,
-                return_tensors="pt",
-                return_attention_mask=True
-            ).to(self.device)
+            # Skip empty lines
+            stripped = line.strip()
+            if not stripped:
+                return line
             
-            outputs = self.comment_model.generate(
-                input_ids=inputs.input_ids,
-                attention_mask=inputs.attention_mask,
-                max_new_tokens=50,
-                num_return_sequences=1,
-                pad_token_id=self.comment_tokenizer.eos_token_id,
-                temperature=0.3,
-                do_sample=True,
-                top_p=0.9,
-                repetition_penalty=1.2
-            )
+            # Skip existing comments
+            if stripped.startswith(('/', ';', '//')):
+                return line
             
-            comment = self.comment_tokenizer.decode(outputs[0], skip_special_tokens=True)
-            comment = comment.split("Comment:")[-1].strip()
+            # Skip labels and directives
+            if stripped.endswith(':') or stripped.startswith('.'):
+                return f"{stripped}\n"
+
+            # Generate focused comment
+            comment = self._get_code_explanation(stripped)
             
-            # Clean up and format
-            comment = comment.replace("\n", " ").strip()
-            comment = re.sub(r'\s+', ' ', comment)
-            comment = comment[:100]
+            # Format output with consistent padding
+            padding = max(1, 40 - len(stripped))
+            return f"{stripped}{' ' * padding}// {comment}\n"
             
-            return comment
         except Exception as e:
-            print(f"Error generating AI comment: {str(e)}")
-            return None
+            self.log_message(f"Error generating AI comment: {str(e)}", error=True)
+            return f"{stripped}\n"
+
+    def _get_code_explanation(self, code):
+        """Get a clean, focused explanation for the code"""
+        try:
+            # First, identify the instruction type
+            parts = code.strip().split(None, 1)
+            instruction = parts[0].lower() if parts else ""
+            
+            # Use specific handlers for common instructions
+            if instruction in self.instruction_handlers:
+                return self.instruction_handlers[instruction](code)
+            
+            # For other instructions, use AI generation
+            prompt = f"Code: {code}\nBrief technical explanation:\n"
+            
+            # Generate and validate response
+            response = self._generate_and_validate_response(prompt, code)
+            
+            return response
+            
+        except Exception as e:
+            self.log_message(f"Error getting explanation: {str(e)}", error=True)
+            return "Performs specified operation."
+
+    def _generate_and_validate_response(self, prompt, code):
+        """Generate response and validate it meets quality standards"""
+        inputs = self.tokenizer(
+            prompt,
+            padding=True,
+            truncation=True,
+            max_length=128,
+            return_tensors="pt",
+            return_attention_mask=True
+        ).to(self.device)
+        
+        outputs = self.model.generate(
+            input_ids=inputs.input_ids,
+            attention_mask=inputs.attention_mask,
+            pad_token_id=self.tokenizer.pad_token_id,
+            eos_token_id=self.tokenizer.eos_token_id,
+            max_new_tokens=30,
+            num_return_sequences=1,
+            temperature=0.1,
+            do_sample=False,
+            num_beams=1
+        )
+        
+        response = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+        
+        # Clean the response
+        response = self._clean_response(response)
+        
+        # Validate response quality
+        if not self._is_valid_response(response, code):
+            # Fall back to pattern-based explanation
+            return self._get_pattern_based_explanation(code)
+        
+        return response
+
+    def _clean_response(self, response):
+        """Clean up the generated response"""
+        # Remove prompt text
+        if 'Code:.*?Brief technical explanation:' in response:
+            response = response.split('Explain this assembly instruction:', 1)[1]
+        
+        # Clean up the text
+        response = response.strip()
+        response = re.sub(r'\s+', ' ', response)
+        response = re.sub(r'^[:\-\s]+', '', response)
+        response = re.sub(r'^(This|The|It)\s+(instruction\s+)?', '', response)
+        
+        # Ensure proper sentence
+        if response and response[0].islower():
+            response = response[0].upper() + response[1:]
+        if response and not response.endswith(('.', '?', '!')):
+            response += '.'
+        
+        return response
+
+    def _is_valid_response(self, response, code):
+        """Validate response meets quality standards"""
+        if not response:
+            return False
+        
+        # Check for incomplete responses
+        if any(x in response.lower() for x in ['how it', 'what registers', 'this instruction', '2.', '3.', '4.']):
+            return False
+        
+        # Check for response just echoing the code
+        if response.lower().replace(' ', '') in code.lower().replace(' ', ''):
+            return False
+        
+        # Check minimum length and word count
+        if len(response) < 10 or len(response.split()) < 3:
+            return False
+        
+        return True
+
+    @property
+    def instruction_handlers(self):
+        """Dictionary of instruction-specific handlers"""
+        return {
+            'mov': self._handle_mov,
+            'push': self._handle_push,
+            'pop': self._handle_pop,
+            'lea': self._handle_lea,
+            'xor': self._handle_xor,
+            'sub': self._handle_sub,
+            'add': self._handle_add,
+        }
+
+    def _handle_mov(self, code):
+        """Handle MOV instruction"""
+        parts = code.split(',', 1)
+        if len(parts) != 2:
+            return "Moves data between registers or memory."
+        dest = parts[0].split()[-1]
+        src = parts[1].strip()
+        return f"Copies value from {src} to {dest}."
+
+    def _handle_push(self, code):
+        """Handle PUSH instruction"""
+        reg = code.split()[-1]
+        return f"Saves {reg} register onto the stack."
+
+    def _handle_pop(self, code):
+        """Handle POP instruction"""
+        reg = code.split()[-1]
+        return f"Restores {reg} register from the stack."
+
+    def _handle_lea(self, code):
+        """Handle LEA instruction"""
+        parts = code.split(',', 1)
+        if len(parts) != 2:
+            return "Calculates effective address."
+        dest = parts[0].split()[-1]
+        src = parts[1].strip()
+        return f"Loads effective address of {src} into {dest}."
+
+    def _handle_xor(self, code):
+        """Handle XOR instruction"""
+        parts = code.split(',', 1)
+        if len(parts) != 2:
+            return "Performs XOR operation."
+        dest = parts[0].split()[-1]
+        src = parts[1].strip()
+        if dest == src:
+            return f"Clears {dest} by XORing with itself."
+        return f"Performs XOR between {src} and {dest}."
+
+    def _handle_sub(self, code):
+        """Handle SUB instruction"""
+        parts = code.split(',', 1)
+        if len(parts) != 2:
+            return "Subtracts values."
+        dest = parts[0].split()[-1]
+        src = parts[1].strip()
+        return f"Subtracts {src} from {dest}."
+
+    def _handle_add(self, code):
+        """Handle ADD instruction"""
+        parts = code.split(',', 1)
+        if len(parts) != 2:
+            return "Adds values."
+        dest = parts[0].split()[-1]
+        src = parts[1].strip()
+        return f"Adds {src} to {dest}."
+
+    def _get_pattern_based_explanation(self, code):
+        """Fallback to pattern-based explanation for code"""
+        return self.generate_pattern_based_comment(code)
+
+    def _is_assembly_instruction(self, line):
+        """Enhanced assembly instruction detection"""
+        stripped = line.strip().lower()
+        
+        # Common assembly instruction patterns
+        asm_patterns = {
+            r'^(mov|push|pop|lea|sub|add|xor|and|or|shl|shr|cmp|jmp|j[a-z]{1,4}|call|ret|nop)\b',  # Instructions
+            r'^[a-z_][a-z0-9_]*:',  # Labels
+            r'^align\s+\w+',        # Alignment directives
+            r'^db\s+|^dw\s+|^dd\s+|^dq\s+',  # Data definitions
+            r'^(byte|word|dword|qword)\s+ptr',  # Size specifiers
+            r'^[a-z]+\s+[a-z0-9]+\s*,',  # Instructions with operands
+        }
+        
+        return any(re.match(pattern, stripped) for pattern in asm_patterns)
 
     def browse_file(self):
         """Browse for a file to analyze"""
@@ -551,27 +737,30 @@ Comment:"""
                 self.log_message(f"Error loading file: {str(e)}", error=True)
 
     def save_output(self):
-        if not self.commented_text.get('1.0', tk.END).strip():
-            messagebox.showwarning("Warning", "No commented code to save!")
-            return
-            
-        file_path = filedialog.asksaveasfilename(
-            defaultextension=".cpp",
-            filetypes=[
-                ("C++ Files", "*.cpp"),
-                ("C Files", "*.c"),
-                ("Header Files", "*.h"),
-                ("Text Files", "*.txt"),
-                ("All Files", "*.*")
-            ]
-        )
-        if file_path:
-            try:
-                with open(file_path, 'w', encoding='utf-8') as file:
-                    file.write(self.commented_text.get('1.0', tk.END))
-                messagebox.showinfo("Success", "File saved successfully!")
-            except Exception as e:
-                messagebox.showerror("Error", f"Error saving file: {str(e)}")
+        """Save analysis results to file"""
+        try:
+            file_path = filedialog.asksaveasfilename(
+                defaultextension=".txt",
+                filetypes=[("Text files", "*.txt"), ("All files", "*.*")]
+            )
+            if file_path:
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    f.write("=== COMMENTED CODE ===\n")
+                    f.write(self.commented_text.get("1.0", tk.END))
+                    f.write("\n=== CRYPTO FINDINGS ===\n")
+                    f.write(self.crypto_text.get("1.0", tk.END))
+                self.log_message(f"Results saved to {file_path}")
+        except Exception as e:
+            self.log_message(f"Error saving results: {str(e)}", error=True)
+
+    def clear_analysis(self):
+        """Clear all analysis results"""
+        self.original_text.delete("1.0", tk.END)
+        self.commented_text.delete("1.0", tk.END)
+        self.crypto_text.delete("1.0", tk.END)
+        self.log_text.delete("1.0", tk.END)
+        self.evidence = []
+        self.log_message("Analysis cleared")
 
     def process_batch(self, lines_batch):
         """Optimized batch processing for high-end CPU"""
@@ -599,9 +788,8 @@ Comment:"""
         
         return filtered_lines
 
-    @lru_cache(maxsize=2000)
     def process_single_line(self, line):
-        """Process assembly line with enhanced crypto detection"""
+        """Process line with enhanced AI-powered analysis"""
         try:
             if not line or line.startswith('//'):
                 return line
@@ -609,137 +797,101 @@ Comment:"""
             stripped = line.strip()
             if not stripped:
                 return line
+
+            # Detect if this is an assembly instruction
+            if self._is_assembly_instruction(stripped):
+                return self._analyze_assembly_instruction(stripped)
             
-            # Enhanced crypto pattern detection with fixed regex patterns
-            crypto_patterns = {
-                # Key schedule / key expansion patterns
-                'key_schedule': (
-                    r'(?i)(movzx|movsx|xor|shl|shr|rol|ror).*?(key|schedule|sbox)',
-                    "Possible key schedule operation"
-                ),
-                # S-box operations
-                'sbox': (
-                    r'(?i)mov[zx]?x?\s+\w+,\s*(\[)?(sbox|table|lookup)',
-                    "S-box lookup operation"
-                ),
-                # Round function patterns
-                'round_ops': (
-                    r'(?i)(xor|add|sub).*?(round|state|block)',
-                    "Cryptographic round operation"
-                ),
-                # Bit manipulation common in crypto
-                'bit_ops': (
-                    r'(rol|ror|rcl|rcr|shl|shr).*?(?:0x[0-9a-fA-F]+|\d+)',
-                    "Bit rotation/shift - possible crypto operation"
-                ),
-                # Key material handling
-                'key_ops': (
-                    r'(?i)(mov|lea).*?(key|iv|nonce|salt)',
-                    "Key material manipulation"
-                ),
-                # Buffer operations with specific sizes (common in block ciphers)
-                'block_ops': (
-                    r'(?i)(mov|lea).*?\[.*?(?:0x10|0x20|0x40)',
-                    "Block cipher operation (16/32/64 byte blocks)"
-                ),
-                # Random number generation
-                'random': (
-                    r'(?i)(rdrand|rdseed|xor.*?rand)',
-                    "Hardware random number generation"
-                ),
-                # Hash function patterns
-                'hash': (
-                    r'(?i)(sha|md5|hash).*?(state|block|digest)',
-                    "Hash function operation"
-                ),
-                # Whitening or mixing operations
-                'mixing': (
-                    r'(?i)(xor|add).*?(?:0x[0-9a-fA-F]{8}|0x[0-9a-fA-F]{16})',
-                    "Data mixing with constants - possible crypto"
-                )
-            }
-            
-            # Check for crypto patterns
-            for pattern_name, (pattern, desc) in crypto_patterns.items():
-                if re.search(pattern, stripped):
-                    padding = max(1, 40 - len(stripped))
-                    return f"{stripped}{' ' * padding}// {desc}\n"
-            
-            # Handle common assembly instructions if no crypto pattern found
-            parts = stripped.lower().split()
-            if not parts:
-                return line
-            
-            instruction = parts[0]
-            operands = ' '.join(parts[1:])
-            
-            # Basic instruction analysis (existing code)
-            if instruction == 'mov':
-                if '[rsp' in operands or '[rbp' in operands:
-                    reg = operands.split(',')[1].strip()
-                    return f"{stripped:<40}// Save {reg} to stack frame\n"
-                elif 'rsp' in operands or 'rbp' in operands:
-                    return f"{stripped:<40}// Stack pointer/frame setup\n"
-                else:
-                    src = operands.split(',')[1].strip()
-                    dst = operands.split(',')[0].strip()
-                    return f"{stripped:<40}// Move {src} into {dst}\n"
-            
-            elif instruction == 'push':
-                reg = operands.strip()
-                return f"{stripped:<40}// Push {reg} onto stack\n"
-            
-            elif instruction == 'pop':
-                reg = operands.strip()
-                return f"{stripped:<40}// Pop value from stack into {reg}\n"
-            
-            elif instruction == 'sub':
-                if 'rsp' in operands:
-                    size = operands.split(',')[1].strip()
-                    size_val = int(size.strip('h'), 16) if 'h' in size else int(size)
-                    return f"{stripped:<40}// Allocate {size_val} bytes of stack space\n"
-                
-            elif instruction == 'add':
-                if 'rsp' in operands:
-                    size = operands.split(',')[1].strip()
-                    size_val = int(size.strip('h'), 16) if 'h' in size else int(size)
-                    return f"{stripped:<40}// Deallocate {size_val} bytes of stack space\n"
-                
-            elif instruction == 'call':
-                return f"{stripped:<40}// Call function {operands}\n"
-            
-            elif instruction == 'ret':
-                return f"{stripped:<40}// Return from function\n"
-            
-            elif instruction == 'test':
-                return f"{stripped:<40}// Compare {operands} against zero\n"
-            
-            elif instruction == 'cmp':
-                ops = operands.split(',')
-                return f"{stripped:<40}// Compare {ops[0].strip()} with {ops[1].strip()}\n"
-            
-            elif instruction in ['je', 'jz']:
-                return f"{stripped:<40}// Jump if equal/zero to {operands}\n"
-            
-            elif instruction in ['jne', 'jnz']:
-                return f"{stripped:<40}// Jump if not equal/nonzero to {operands}\n"
-            
-            elif instruction == 'jmp':
-                return f"{stripped:<40}// Unconditional jump to {operands}\n"
-            
-            elif instruction == 'lea':
-                dst, src = operands.split(',')
-                return f"{stripped:<40}// Load effective address of {src.strip()} into {dst.strip()}\n"
-            
-            elif instruction in ['and', 'or', 'xor']:
-                ops = operands.split(',')
-                return f"{stripped:<40}// Bitwise {instruction} of {ops[0].strip()} with {ops[1].strip()}\n"
-            
-            return f"{stripped}\n"
+            # Use AI model for other code
+            return self._generate_ai_comment(stripped)
             
         except Exception as e:
-            self.log_message(f"Error analyzing instruction: {str(e)}", error=True)
+            self.log_message(f"Error analyzing line: {str(e)}", error=True)
             return f"{stripped}\n"
+
+    def _analyze_assembly_instruction(self, line):
+        """Analyze assembly instruction and generate clean comment"""
+        try:
+            # First try pattern-based analysis
+            instruction_type = self._get_instruction_type(line)
+            if instruction_type:
+                comment = self._get_instruction_comment(line, instruction_type)
+                if comment:
+                    padding = max(1, 40 - len(line))
+                    return f"{line}{' ' * padding}// {comment}\n"
+            
+            # Fall back to AI analysis if needed
+            prompt = (
+                f"Explain this x86_64 assembly instruction in one clear, technical sentence:\n"
+                f"{line}\n"
+                f"Focus on what the instruction does, not how it works."
+            )
+            
+            inputs = self.tokenizer(
+                prompt,
+                return_tensors="pt",
+                max_length=128,
+                truncation=True,
+                padding=True
+            ).to(self.device)
+            
+            with torch.no_grad():
+                outputs = self.model.generate(
+                    **inputs,
+                    max_new_tokens=40,
+                    num_beams=1,
+                    temperature=0.3,
+                    do_sample=False
+                )
+            
+            comment = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+            comment = self._clean_ai_comment(comment)
+            
+            padding = max(1, 40 - len(line))
+            return f"{line}{' ' * padding}// {comment}\n"
+        
+        except Exception as e:
+            self.log_message(f"Analysis failed: {str(e)}", error=True)
+            return f"{line}\n"
+
+    def _clean_ai_comment(self, comment: str) -> str:
+        """Clean and format AI-generated comment"""
+        # Remove prompt and instruction text
+        comment = re.sub(r'.*Comment:', '', comment, flags=re.DOTALL)
+        
+        # Remove numbered points and their content
+        comment = re.sub(r'\d+\.\s+.*?(?=\d+\.|$)', '', comment, flags=re.DOTALL)
+        
+        # Remove common filler phrases
+        filler_phrases = [
+            'this line',
+            'this code',
+            'the code',
+            'basically',
+            'simply',
+            'just',
+            'here we',
+            'we are'
+        ]
+        for phrase in filler_phrases:
+            comment = re.sub(rf'\b{phrase}\b', '', comment, flags=re.IGNORECASE)
+        
+        # Clean up formatting
+        comment = re.sub(r'\s+', ' ', comment)
+        comment = comment.strip()
+        
+        # Ensure proper sentence
+        if comment and comment[0].islower():
+            comment = comment[0].upper() + comment[1:]
+        if comment and not comment.endswith(('.', '?', '!')):
+            comment += '.'
+        
+        # Limit length
+        MAX_LEN = 80
+        if len(comment) > MAX_LEN:
+            comment = comment[:MAX_LEN].rstrip() + '...'
+        
+        return comment
 
     def toggle_pause(self):
         """Toggle pause state"""
@@ -747,38 +899,29 @@ Comment:"""
         self.pause_btn.config(text="Resume" if self.is_paused.get() else "Pause")
 
     def analyze_code(self):
+        """Analyze code without AI, using pattern matching and crypto detection"""
         try:
-            with open(self.file_path_var.get(), 'r', encoding='utf-8') as f:
-                lines = f.readlines()
+            content = self.original_text.get("1.0", tk.END)
+            if not content.strip():
+                self.log_message("No code to analyze!", error=True)
+                return
+                
+            self.log_message("Starting pattern-based analysis...")
             
-            total_lines = len(lines)
-            self.progress['maximum'] = total_lines
-            self.commented_text.delete(1.0, tk.END)
-            
-            # Detect if this is assembly code
-            is_assembly = any(line.strip().startswith(('mov ', 'push ', 'pop ', 'lea ', 'sub ', 'add ')) 
-                             or '=' in line and 'ptr' in line 
-                             for line in lines[:20])
-            
-            # Initialize analysis state
+            # Process the file line by line
+            lines = content.split('\n')
+            commented_lines = []
             current_function = []
             in_function = False
             function_start_line = 0
             
             for i, line in enumerate(lines):
+                if i % 10 == 0:
+                    self.log_message(f"Processing line {i+1}/{len(lines)}")
+            
                 stripped = line.strip()
                 
-                if i % 10 == 0:
-                    self.progress['value'] = (i / total_lines) * 100
-                    self.root.update_idletasks()
-                
-                # Assembly code analysis
-                if is_assembly:
-                    commented_line = self.process_single_line(line)
-                    self.commented_text.insert(tk.END, commented_line)
-                    continue
-                
-                # High-level code analysis - detect function boundaries
+                # Detect function boundaries for crypto analysis
                 if re.match(r'(?i)(\w+\s+)*(\w+)\s*\([^)]*\)\s*{', stripped):
                     in_function = True
                     function_start_line = i
@@ -792,36 +935,71 @@ Comment:"""
                         is_crypto, evidence, score = self.analyze_function_block(current_function)
                         
                         if is_crypto:
-                            self.commented_text.insert(tk.END, "\n// ==========================================\n")
-                            self.commented_text.insert(tk.END, "// SECURITY/CRYPTO FUNCTION DETECTED\n")
-                            self.commented_text.insert(tk.END, f"// Confidence Score: {score}\n")
-                            self.commented_text.insert(tk.END, "// Evidence:\n")
+                            commented_lines.append("\n// ==========================================")
+                            commented_lines.append("// SECURITY/CRYPTO FUNCTION DETECTED")
+                            commented_lines.append(f"// Confidence Score: {score}")
+                            commented_lines.append("// Evidence:")
                             for e in evidence:
-                                self.commented_text.insert(tk.END, f"// - {e}\n")
-                            self.commented_text.insert(tk.END, "// ==========================================\n\n")
+                                commented_lines.append(f"// - {e}")
+                            commented_lines.append("// ==========================================\n")
                             
                             self.log_message(f"Found crypto/security function at line {function_start_line + 1}")
                         
-                        # Add commented function with crypto-specific comments if relevant
+                        # Add function lines with appropriate comments
                         for func_line in current_function:
-                            commented = self.add_crypto_specific_comment(func_line, is_crypto)
-                            self.commented_text.insert(tk.END, commented)
+                            if func_line.strip():
+                                if self._is_assembly_instruction(func_line):
+                                    instruction_type = self._get_instruction_type(func_line)
+                                    if instruction_type:
+                                        comment = self._get_instruction_comment(func_line, instruction_type)
+                                        commented_lines.append(f"{func_line:<40}// {comment}")
+                                    else:
+                                        commented_lines.append(func_line)
+                                else:
+                                    security_patterns = self.analyze_security_patterns(func_line)
+                                    if security_patterns:
+                                        commented_lines.append(f"{func_line:<40}// {security_patterns[0]}")
+                                    elif pattern_comment := self._try_pattern_match(func_line):
+                                        commented_lines.append(pattern_comment)
+                                    else:
+                                        commented_lines.append(func_line)
+                            else:
+                                commented_lines.append(func_line)
                         
-                        if is_crypto:
-                            self.commented_text.insert(tk.END, "\n// =========== END SECURITY FUNCTION ===========\n\n")
-                        
-                        current_function = []
                         in_function = False
+                        current_function = []
+                    continue
+                
+                # Process non-function lines
+                if stripped:
+                    if self._is_assembly_instruction(stripped):
+                        instruction_type = self._get_instruction_type(stripped)
+                        if instruction_type:
+                            comment = self._get_instruction_comment(stripped, instruction_type)
+                            commented_lines.append(f"{stripped:<40}// {comment}")
+                        else:
+                            commented_lines.append(stripped)
+                    else:
+                        security_patterns = self.analyze_security_patterns(stripped)
+                        if security_patterns:
+                            commented_lines.append(f"{stripped:<40}// {security_patterns[0]}")
+                        elif pattern_comment := self._try_pattern_match(stripped):
+                            commented_lines.append(pattern_comment)
+                        else:
+                            commented_lines.append(stripped)
                 else:
-                    # Handle non-function code
-                    self.commented_text.insert(tk.END, self.add_basic_comment(line))
+                    commented_lines.append(line)
+                    
+            # Update the commented text widget
+            self.commented_text.delete("1.0", tk.END)
+            self.commented_text.insert("1.0", '\n'.join(commented_lines))
             
-            self.status_var.set("Analysis complete!")
-            self.refine_btn.config(state='normal')
+            self.log_message("Analysis complete!")
             
         except Exception as e:
-            self.log_message(f"Error during analysis: {str(e)}", error=True)
-            raise
+            self.log_message(f"Analysis failed: {str(e)}", error=True)
+            import traceback
+            self.log_message(traceback.format_exc(), error=True)
 
     def add_intelligent_comment(self, line, is_crypto=False):
         """Add appropriate comment to a line"""
@@ -888,13 +1066,6 @@ Comment:"""
         """Final UI update"""
         self.commented_text.delete('1.0', tk.END)
         self.commented_text.insert(tk.END, ''.join(all_lines))
-
-    def clear_all(self):
-        """Clear all content but keep Refine button enabled"""
-        self.original_text.delete(1.0, tk.END)
-        self.commented_text.delete(1.0, tk.END)
-        self.file_path_var.set("")
-        self.status_var.set("Ready")
 
     def stop_analysis(self):
         """Stop the current analysis"""
@@ -1630,11 +1801,700 @@ Answer format: YES/NO followed by explanation of security-relevant features foun
             self.log_message(f"Error saving findings: {str(e)}", error=True)
             messagebox.showerror("Error", f"Failed to save findings: {str(e)}")
 
+    def process_file(self, content):
+        """Process file content using parallel processing"""
+        try:
+            # Split content into lines
+            lines = content.split('\n')
+            total_lines = len(lines)
+            self.log_message(f"Starting parallel processing of {total_lines} lines...")
+            
+            # Create temporary directory for line files
+            with tempfile.TemporaryDirectory() as temp_dir:
+                self.log_message(f"Created temporary directory: {temp_dir}")
+                
+                # Create tasks for parallel processing
+                tasks = []
+                for i, line in enumerate(lines):
+                    if line.strip():  # Skip empty lines
+                        file_path = os.path.join(temp_dir, f'line_{i:05d}.txt')
+                        with open(file_path, 'w', encoding='utf-8') as f:
+                            f.write(line)
+                        tasks.append((file_path, i))
+                        if i % 100 == 0:
+                            self.log_message(f"Created task file {i}/{total_lines}")
+                
+                total_tasks = len(tasks)
+                self.log_message(f"Created {total_tasks} task files")
+                
+                # Process lines in parallel
+                results = {}
+                num_workers = min(32, os.cpu_count() * 4)
+                self.log_message(f"Starting processing with {num_workers} workers")
+                
+                with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
+                    # Submit all tasks
+                    future_to_line = {
+                        executor.submit(self._process_line_file, file_path): (file_path, idx)
+                        for file_path, idx in tasks
+                    }
+                    
+                    # Process results as they complete
+                    completed = 0
+                    for future in concurrent.futures.as_completed(future_to_line):
+                        file_path, idx = future_to_line[future]
+                        try:
+                            result = future.result()
+                            results[idx] = result
+                            completed += 1
+                            if completed % 10 == 0:  # More frequent progress updates
+                                self.log_message(f"Processed {completed}/{total_tasks} lines ({(completed/total_tasks)*100:.1f}%)")
+                        except Exception as e:
+                            self.log_message(f"Error processing line {idx} ({file_path}): {str(e)}", error=True)
+                            results[idx] = lines[idx]
+                
+                # Verify all lines were processed
+                self.log_message(f"Completed processing {len(results)}/{total_tasks} lines")
+                
+                # Reconstruct file with comments
+                self.log_message("Reconstructing file...")
+                commented_lines = []
+                for i in range(len(lines)):
+                    if i in results:
+                        commented_lines.append(results[i])
+                    else:
+                        self.log_message(f"Missing result for line {i}", error=True)
+                        commented_lines.append(lines[i])
+                
+                self.log_message("Processing complete!")
+                return '\n'.join(commented_lines)
+                
+        except Exception as e:
+            self.log_message(f"Error in parallel processing: {str(e)}", error=True)
+            return content
+
+    def _process_line_file(self, file_path):
+        """Process a single line file"""
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                line = f.read().strip()
+            
+            if not line or line.startswith((';', '//', '{')):
+                return line
+                
+            # Handle variable definitions
+            if '=' in line and 'ptr' in line:
+                return self._handle_variable_definition(line)
+                
+            # Handle instructions
+            instruction_type = self._get_instruction_type(line)
+            if instruction_type:
+                comment = self._get_instruction_comment(line, instruction_type)
+                padding = max(1, 40 - len(line))
+                return f"{line}{' ' * padding}// {comment}"
+                
+            return line
+            
+        except Exception as e:
+            self.log_message(f"Error processing file {file_path}: {str(e)}", error=True)
+            return line
+
+    def _clean_comment(self, comment):
+        """Clean and format comment text"""
+        # Remove numbered points and filler phrases
+        comment = re.sub(r'\b\d+\.\s.*?(?=(\b\d+\.\s|$))', '', comment, flags=re.DOTALL)
+        comment = re.sub(r'(?i)(this instruction|what registers|code:|brief technical explanation:|how it)', '', comment)
+        
+        # Clean up formatting
+        comment = re.sub(r'\s+', ' ', comment).strip()
+        comment = re.sub(r'^[:\-\s]+', '', comment)
+        
+        # Ensure proper sentence
+        if comment and comment[0].islower():
+            comment = comment[0].upper() + comment[1:]
+        if comment and not comment.endswith(('.', '?', '!')):
+            comment += '.'
+            
+        # Limit length
+        MAX_LEN = 80
+        if len(comment) > MAX_LEN:
+            comment = comment[:MAX_LEN].rstrip() + "..."
+            
+        return comment
+
+    def _handle_variable_definition(self, line):
+        """Handle variable definition lines"""
+        parts = line.split('=')
+        if len(parts) != 2:
+            return line
+            
+        var_name = parts[0].strip()
+        var_type = parts[1].strip()
+        
+        size_map = {
+            'byte ptr': '8-bit',
+            'word ptr': '16-bit',
+            'dword ptr': '32-bit',
+            'qword ptr': '64-bit',
+            'xmmword ptr': '128-bit'
+        }
+        
+        for type_str, size_desc in size_map.items():
+            if type_str in var_type:
+                offset = var_type.split()[-1]
+                is_local = offset.startswith('-')
+                desc = f"local {size_desc} variable" if is_local else f"{size_desc} parameter"
+                return f"{line:<40}// Defines {desc} at offset {offset}."
+        
+        return line
+
+    def _get_instruction_type(self, line: str) -> str:
+        """Determine the type of assembly instruction"""
+        line = line.lower().strip()
+        
+        # Common instruction patterns
+        patterns = {
+            'mov': r'^mov\s+',
+            'push': r'^push\s+',
+            'pop': r'^pop\s+',
+            'lea': r'^lea\s+',
+            'xor': r'^xor\s+',
+            'sub': r'^sub\s+',
+            'add': r'^add\s+',
+            'test': r'^test\s+',
+            'cmp': r'^cmp\s+',
+            'jmp': r'^jmp\s+',
+            'j': r'^j[a-z]+\s+',  # Conditional jumps
+            'call': r'^call\s+',
+            'ret': r'^ret\b',
+            'nop': r'^nop\b',
+            'and': r'^and\s+',
+            'or': r'^or\s+',
+            'shl': r'^shl\s+',
+            'shr': r'^shr\s+',
+            'inc': r'^inc\s+',
+            'dec': r'^dec\s+'
+        }
+        
+        # Check each pattern
+        for inst_type, pattern in patterns.items():
+            if re.match(pattern, line):
+                return inst_type
+                
+        # Check for special cases
+        if re.match(r'^j[a-z]{1,4}\s+', line):  # Conditional jumps (je, jne, jg, etc.)
+            return 'j'
+            
+        return None
+
+    def _get_instruction_comment(self, line: str, inst_type: str) -> str:
+        """Generate appropriate comment based on instruction type"""
+        parts = line.split(',', 1)
+        operands = parts[1].strip() if len(parts) > 1 else ''
+        dest = parts[0].split(None, 1)[1] if len(parts[0].split()) > 1 else ''
+        
+        def clean_mem_ref(op):
+            """Clean memory reference for readability"""
+            return op.replace('ptr', '').replace('byte', '').replace('word', '').strip()
+        
+        # Instruction-specific handlers
+        handlers = {
+            'mov': lambda: (
+                f"Stores {operands} into {clean_mem_ref(dest)}." if '[' in dest else
+                f"Loads from {clean_mem_ref(operands)} into {dest}." if '[' in operands else
+                f"Copies {operands} to {dest}."
+            ),
+            'push': lambda: f"Saves {line.split()[-1]} on stack.",
+            'pop': lambda: f"Restores {line.split()[-1]} from stack.",
+            'lea': lambda: f"Gets address of {clean_mem_ref(operands)} into {dest}.",
+            'xor': lambda: (
+                f"Clears {dest}." if dest == operands.strip() else
+                f"XORs {operands} with {dest}."
+            ),
+            'sub': lambda: (
+                f"Allocates {operands} bytes." if 'rsp' in dest else
+                f"Subtracts {operands} from {dest}."
+            ),
+            'add': lambda: (
+                f"Deallocates {operands} bytes." if 'rsp' in dest else
+                f"Adds {operands} to {dest}."
+            ),
+            'test': lambda: f"Tests {operands} against {dest}.",
+            'cmp': lambda: f"Compares {dest} with {operands}.",
+            'call': lambda: f"Calls {line.split()[-1].split(';')[0].strip()}.",
+            'jmp': lambda: f"Jumps to {line.split()[-1]}.",
+            'ret': lambda: "Returns from function.",
+            'nop': lambda: "No operation.",
+            'and': lambda: f"Performs AND between {operands} and {dest}.",
+            'or': lambda: f"Performs OR between {operands} and {dest}.",
+            'shl': lambda: f"Shifts {dest} left by {operands}.",
+            'shr': lambda: f"Shifts {dest} right by {operands}.",
+            'inc': lambda: f"Increments {dest}.",
+            'dec': lambda: f"Decrements {dest}."
+        }
+        
+        # Get comment from handler or generate conditional jump comment
+        if inst_type in handlers:
+            return handlers[inst_type]()
+        elif inst_type == 'j':
+            condition = line.split()[0][1:].upper()  # Extract condition from jump instruction
+            return f"Jumps to {line.split()[-1]} if {condition} condition is met."
+        
+        return "Performs specified operation."
+
+    def _generate_fallback_comment(self, line):
+        """Generate comment using AI with strict validation"""
+        try:
+            inputs = self.tokenizer(
+                f"Explain this assembly instruction briefly: {line}",
+                padding=True,
+                truncation=True,
+                max_length=128,
+                return_tensors="pt",
+                return_attention_mask=True
+            ).to(self.device)
+            
+            outputs = self.model.generate(
+                input_ids=inputs.input_ids,
+                attention_mask=inputs.attention_mask,
+                max_new_tokens=30,
+                temperature=0.1,
+                do_sample=False,
+                num_beams=1
+            )
+            
+            comment = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+            comment = self._validate_comment(comment, line)
+            return comment
+            
+        except Exception:
+            return "Performs specified operation."
+
+    def _validate_comment(self, comment, line):
+        """Validate and clean generated comment"""
+        # Remove prompt and clean
+        comment = re.sub(r'Explain this assembly instruction briefly:', '', comment)
+        comment = comment.strip()
+        
+        # Remove common bad patterns
+        if any(x in comment.lower() for x in [
+            'how it', 'what registers', '2.', '3.', '4.',
+            'this instruction', 'the instruction'
+        ]):
+            return "Performs specified operation."
+        
+        # Clean up formatting
+        comment = re.sub(r'\s+', ' ', comment)
+        comment = re.sub(r'^[:\-\s]+', '', comment)
+        
+        # Ensure proper sentence
+        if comment and comment[0].islower():
+            comment = comment[0].upper() + comment[1:]
+        if comment and not comment.endswith(('.', '?', '!')):
+            comment += '.'
+        
+        return comment
+
+    def _test_parallel_processing(self):
+        """Test parallel processing functionality"""
+        test_content = "\n".join([f"mov rax, {i}" for i in range(100)])
+        processed = self.process_file(test_content)
+        lines = processed.split('\n')
+        self.log_message(f"Test processed {len(lines)} lines")
+        return all('// Copies value' in line for line in lines if line.strip())
+
+    def _add_high_level_comment(self, line: str) -> str:
+        """Generate meaningful comments for high-level code using DeepSeek"""
+        stripped = line.strip()
+        if not stripped or '//' in stripped:
+            return line
+        
+        try:
+            # First try pattern matching for common cases
+            if pattern_comment := self._try_pattern_match(stripped):
+                return pattern_comment
+                
+            # Use DeepSeek for complex cases
+            prompt = f"""Explain this line of C/C++ code with a technical comment:
+{stripped}
+
+Requirements:
+- Focus on what the code does technically
+- Explain memory operations and data flow
+- Be specific about operations and their effects
+- Keep it concise (one line)
+- Format: code // comment
+
+Example:
+*(uint *)(ptr + -0x10) = *(uint *)(ptr + -0x10) + 1; // Increment reference counter in memory block header
+"""
+            
+            inputs = self.tokenizer(
+                prompt,
+                padding=True,
+                truncation=True,
+                max_length=256,
+                return_tensors="pt",
+                return_attention_mask=True
+            ).to(self.device)
+            
+            with torch.no_grad():
+                outputs = self.model.generate(
+                    **inputs,
+                    max_new_tokens=64,
+                    temperature=0.1,
+                    do_sample=False,
+                    num_beams=1,
+                    pad_token_id=self.tokenizer.pad_token_id,
+                    eos_token_id=self.tokenizer.eos_token_id
+                )
+            
+            comment = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+            
+            # Extract just the comment part
+            if '//' in comment:
+                comment = comment.split('//')[-1].strip()
+                comment = self._clean_comment(comment)
+                return f"{stripped:<40}// {comment}"
+                
+            return stripped + '\n'
+            
+        except Exception as e:
+            self.log_message(f"DeepSeek comment generation failed: {str(e)}", error=True)
+            return stripped + '\n'
+
+    def _create_comment_prompt(self, line: str) -> str:
+        """Create context-aware prompt for the AI model"""
+        return f"""Generate a short, technical comment for this C/C++ code line:
+{line}
+
+Focus on:
+1. What the code does
+2. Any important side effects
+3. Key operations or data flow
+
+Comment:"""
+
+    def _clean_ai_comment(self, comment: str) -> str:
+        """Clean and format AI-generated comment"""
+        # Remove prompt and instruction text
+        comment = re.sub(r'.*Comment:', '', comment, flags=re.DOTALL)
+        
+        # Remove numbered points and their content
+        comment = re.sub(r'\d+\.\s+.*?(?=\d+\.|$)', '', comment, flags=re.DOTALL)
+        
+        # Remove common filler phrases
+        filler_phrases = [
+            'this line',
+            'this code',
+            'the code',
+            'basically',
+            'simply',
+            'just',
+            'here we',
+            'we are'
+        ]
+        for phrase in filler_phrases:
+            comment = re.sub(rf'\b{phrase}\b', '', comment, flags=re.IGNORECASE)
+        
+        # Clean up formatting
+        comment = re.sub(r'\s+', ' ', comment)
+        comment = comment.strip()
+        
+        # Ensure proper sentence
+        if comment and comment[0].islower():
+            comment = comment[0].upper() + comment[1:]
+        if comment and not comment.endswith(('.', '?', '!')):
+            comment += '.'
+        
+        # Limit length
+        MAX_LEN = 80
+        if len(comment) > MAX_LEN:
+            comment = comment[:MAX_LEN].rstrip() + '...'
+        
+        return comment
+
+    def _try_pattern_match(self, line: str) -> Optional[str]:
+        """Try to match common patterns before using AI"""
+        # Variable declarations
+        if var_match := re.match(r'^([a-zA-Z_][a-zA-Z0-9_]*\s*\**)\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*;', line):
+            type_name = var_match.group(1).strip()
+            var_name = var_match.group(2)
+            if '*' in type_name:
+                return f"{line:<40}// Declare pointer to {type_name.replace('*', '')}\n"
+            return f"{line:<40}// Declare {type_name} variable {var_name}\n"
+        
+        # Function declarations
+        if func_match := re.match(r'^([a-zA-Z_][a-zA-Z0-9_]*\s+[\*\s]*)([a-zA-Z_][a-zA-Z0-9_]*)\s*\([^)]*\)\s*\{?', line):
+            return f"{line:<40}// Function definition\n"
+        
+        # Simple patterns that don't need AI
+        patterns = {
+            r'^\s*return\s*;': "Return from function",
+            r'^\s*break\s*;': "Break from loop or switch",
+            r'^\s*continue\s*;': "Skip to next iteration",
+            r'^\s*LOCK\(\);': "Begin atomic operation",
+            r'^\s*UNLOCK\(\);': "End atomic operation",
+            r'^\s*{\s*$': "Begin block",
+            r'^\s*}\s*$': "End block"
+        }
+        
+        for pattern, comment in patterns.items():
+            if re.match(pattern, line):
+                return f"{line:<40}// {comment}\n"
+        
+        return None
+
+    def process_code_with_ai(self, code_text: str) -> str:
+        """Process large code files in chunks using AI"""
+        # Split into chunks of reasonable size
+        chunks = self._split_into_chunks(code_text)
+        commented_chunks = []
+        
+        # Process each chunk
+        for chunk_idx, chunk in enumerate(chunks):
+            try:
+                # Create context-aware prompt for this chunk
+                prompt = self._create_chunk_prompt(chunk, chunk_idx, len(chunks))
+                
+                # Generate comments using AI
+                inputs = self.tokenizer(
+                    prompt,
+                    padding=True,
+                    truncation=True,
+                    max_length=512,
+                    return_tensors="pt",
+                    return_attention_mask=True
+                ).to(self.device)
+                
+                with torch.no_grad():
+                    outputs = self.model.generate(
+                        **inputs,
+                        max_new_tokens=256,
+                        temperature=0.1,
+                        do_sample=False,
+                        num_beams=1,
+                        pad_token_id=self.tokenizer.pad_token_id,
+                        eos_token_id=self.tokenizer.eos_token_id
+                    )
+                
+                # Process AI output
+                comments = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+                commented_chunk = self._apply_ai_comments(chunk, comments)
+                commented_chunks.append(commented_chunk)
+                
+            except Exception as e:
+                self.log_message(f"Chunk {chunk_idx} processing failed: {str(e)}", error=True)
+                commented_chunks.append(chunk)  # Keep original if AI fails
+        
+        return '\n'.join(commented_chunks)
+
+    def _split_into_chunks(self, text: str, max_lines: int = 10) -> List[str]:
+        """Split code into logical chunks"""
+        lines = text.split('\n')
+        chunks = []
+        current_chunk = []
+        
+        for line in lines:
+            current_chunk.append(line)
+            
+            # Start new chunk on function boundaries or max lines
+            if len(current_chunk) >= max_lines or line.strip() == '}':
+                chunks.append('\n'.join(current_chunk))
+                current_chunk = []
+        
+        # Add remaining lines
+        if current_chunk:
+            chunks.append('\n'.join(current_chunk))
+        
+        return chunks
+
+    def _create_chunk_prompt(self, chunk: str, idx: int, total: int) -> str:
+        """Create context-aware prompt for code chunk"""
+        return f"""Add technical comments to this C/C++ code segment (chunk {idx + 1} of {total}):
+
+{chunk}
+
+Focus on:
+1. Variable declarations and their purpose
+2. Function calls and their effects
+3. Control flow and conditions
+4. Memory operations and pointer usage
+
+Generate concise, technical comments for each line. Format:
+code // comment
+
+Comments:"""
+
+    def _apply_ai_comments(self, chunk: str, ai_output: str) -> str:
+        """Apply AI-generated comments to code chunk"""
+        # Split into lines
+        code_lines = chunk.split('\n')
+        comment_lines = ai_output.split('\n')
+        
+        # Clean up AI output
+        comment_lines = [
+            line.split('//')[-1].strip() 
+            for line in comment_lines 
+            if '//' in line and line.strip()
+        ]
+        
+        # Ensure we have enough comments
+        while len(comment_lines) < len(code_lines):
+            comment_lines.append('')
+        
+        # Combine code with comments
+        commented_lines = []
+        for code, comment in zip(code_lines, comment_lines):
+            if comment:
+                commented_lines.append(f"{code:<40}// {comment}")
+            else:
+                commented_lines.append(code)
+        
+        return '\n'.join(commented_lines)
+
+    def analyze_with_deepseek(self):
+        """Analyze code using DeepSeek model and check for crypto functions"""
+        try:
+            content = self.original_text.get("1.0", tk.END)
+            if not content.strip():
+                self.log_message("No code to analyze!", error=True)
+                return
+                
+            self.log_message("Starting combined analysis...")
+            
+            # First do crypto analysis
+            self.log_message("Running crypto analysis...")
+            self.evidence = []  # Reset evidence list
+            processed_content = self.process_file(content)
+            
+            # Extract crypto findings
+            sections = self._extract_crypto_sections(processed_content)
+            if sections:
+                self.log_message("Found potential crypto sections")
+                self._show_refinement_window(processed_content)
+            
+            # Then do DeepSeek analysis
+            self.log_message("Starting DeepSeek analysis...")
+            lines = content.split('\n')
+            commented_lines = []
+            
+            for i, line in enumerate(lines):
+                if i % 10 == 0:
+                    self.log_message(f"Processing line {i+1}/{len(lines)}")
+                    
+                if line.strip():
+                    try:
+                        # Use DeepSeek for each non-empty line
+                        prompt = f"""Explain this assembly/C code line technically:
+{line}
+
+Requirements:
+- Explain the exact operation being performed
+- Include register/memory/pointer operations
+- Describe bit manipulations if present
+- Format: code // technical explanation
+
+Example:
+*(uint *)(ptr + -0x10) = *(uint *)(ptr + -0x10) + 1; // Increment reference counter at negative offset from pointer
+"""
+                        
+                        inputs = self.tokenizer(
+                            prompt,
+                            padding=True,
+                            truncation=True,
+                            max_length=256,
+                            return_tensors="pt",
+                            return_attention_mask=True
+                        ).to(self.device)
+                        
+                        with torch.no_grad():
+                            outputs = self.model.generate(
+                                **inputs,
+                                max_new_tokens=64,
+                                temperature=0.1,
+                                do_sample=False,
+                                num_beams=1
+                            )
+                        
+                        comment = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+                        
+                        # Extract comment
+                        if '//' in comment:
+                            comment = comment.split('//')[-1].strip()
+                            comment = self._clean_comment(comment)
+                            commented_lines.append(f"{line:<40}// {comment}")
+                        else:
+                            commented_lines.append(line)
+                            
+                    except Exception as e:
+                        self.log_message(f"Error on line {i+1}: {str(e)}", error=True)
+                        commented_lines.append(line)
+                else:
+                    commented_lines.append(line)
+                    
+            # Update the commented text widget
+            self.commented_text.delete("1.0", tk.END)
+            self.commented_text.insert("1.0", '\n'.join(commented_lines))
+            
+            # Add crypto findings summary if any
+            if self.evidence:
+                self.commented_text.insert(tk.END, "\n\n=== CRYPTO FINDINGS ===\n")
+                for item in self.evidence:
+                    self.commented_text.insert(tk.END, f"\n- {item}")
+            
+            self.log_message("Combined analysis complete!")
+            
+        except Exception as e:
+            self.log_message(f"Analysis failed: {str(e)}", error=True)
+            import traceback
+            self.log_message(traceback.format_exc(), error=True)
+
+    def analyze_crypto(self):
+        """Analyze code for cryptographic patterns"""
+        try:
+            content = self.commented_text.get("1.0", tk.END)
+            if not content.strip():
+                content = self.original_text.get("1.0", tk.END)
+                
+            if not content.strip():
+                self.log_message("No code to analyze!", error=True)
+                return
+                
+            self.log_message("Starting crypto analysis...")
+            self.evidence = []  # Reset evidence list
+            
+            # Process for crypto findings
+            processed_content = self.process_file(content)
+            sections = self._extract_crypto_sections(processed_content)
+            
+            # Clear and update crypto findings
+            self.crypto_text.delete("1.0", tk.END)
+            
+            if sections:
+                self.crypto_text.insert(tk.END, "=== CRYPTO FINDINGS ===\n\n")
+                for section in sections:
+                    self.crypto_text.insert(tk.END, f"Found in section:\n{section}\n\n")
+                
+                for item in self.evidence:
+                    self.crypto_text.insert(tk.END, f"- {item}\n")
+            else:
+                self.crypto_text.insert(tk.END, "No crypto-related code sections found.")
+            
+            self.log_message("Crypto analysis complete!")
+            
+        except Exception as e:
+            self.log_message(f"Crypto analysis failed: {str(e)}", error=True)
+            import traceback
+            self.log_message(traceback.format_exc(), error=True)
+
 def main():
     root = tk.Tk()
     root.title("DeepSeek Code Analyzer")
-    root.geometry("1200x900")
+    root.geometry("1800x1000")  # Increased size
     app = CodeCommenterGUI(root)
+    if app._test_parallel_processing():
+        print("Parallel processing test passed!")
     root.mainloop()
 
 if __name__ == "__main__":
