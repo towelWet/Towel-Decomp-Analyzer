@@ -1404,57 +1404,101 @@ Answer format: YES/NO followed by explanation of security-relevant features foun
         sections = []
         current_section = []
         in_crypto_section = False
+        current_function_code = []
         
         # Split content into lines for analysis
         lines = content.split('\n')
+        i = 0
         
-        for i, line in enumerate(lines):
+        while i < len(lines):
+            line = lines[i]
+            
             # Detect start of crypto section
-            if any(marker in line for marker in [
-                "SECURITY/CRYPTO FUNCTION DETECTED",
+            if "// SECURITY/CRYPTO FUNCTION DETECTED" in line or any(marker in line for marker in [
                 "KEY GENERATION FUNCTION DETECTED",
                 "CRYPTO FINDINGS SUMMARY",
-                "// ==========================================",
                 "; Cryptographic Operation Detected",
                 "; Security-Critical Function"
             ]):
-                if current_section:  # Save previous section if exists
+                # Save previous section if it exists
+                if current_section:
                     sections.append('\n'.join(current_section))
-                current_section = [line]
-                in_crypto_section = True
-                continue
-            
-            # Detect end of crypto section
-            if in_crypto_section and any(marker in line for marker in [
-                "END SECURITY FUNCTION",
-                "==========",
-                "; End Crypto Section"
-            ]):
-                current_section.append(line)
-                sections.append('\n'.join(current_section))
-                current_section = []
-                in_crypto_section = False
-                continue
-            
-            # Collect lines within crypto section
-            if in_crypto_section:
-                current_section.append(line)
                 
-                # Check for evidence in comments
-                if line.strip().startswith(('// Evidence:', '; Evidence:')):
-                    # Collect evidence and related code
-                    j = i + 1
-                    while j < len(lines) and j < i + 10:  # Look ahead up to 10 lines
-                        evidence_line = lines[j]
-                        if evidence_line.strip().startswith(('// -', '; -')):
-                            current_section.append(evidence_line)
-                        j += 1
+                current_section = [line]
+                current_function_code = []
+                in_crypto_section = True
+                
+                # Collect header (including score and evidence header)
+                while i + 1 < len(lines) and "// Evidence:" not in lines[i + 1]:
+                    i += 1
+                    current_section.append(lines[i])
+                
+                if i + 1 < len(lines):
+                    current_section.append(lines[i + 1])  # Add "// Evidence:" line
+                    i += 1
+                
+                # Collect evidence (avoiding duplicate IV findings)
+                seen_iv = False
+                while i + 1 < len(lines) and lines[i + 1].strip().startswith("// -"):
+                    i += 1
+                    if "Initialization vector usage" in lines[i]:
+                        if not seen_iv:
+                            current_section.append(lines[i])
+                            seen_iv = True
+                    else:
+                        current_section.append(lines[i])
+                
+                # Collect function code until next section or end marker
+                code_started = False
+                while i + 1 < len(lines):
+                    i += 1
+                    next_line = lines[i]
+                    
+                    # Stop at next section marker
+                    if "// SECURITY/CRYPTO FUNCTION DETECTED" in next_line:
+                        i -= 1  # Back up to process this marker in next iteration
+                        break
+                        
+                    # Skip empty lines at the start of code
+                    if not code_started and not next_line.strip():
+                        continue
+                        
+                    # Add code line
+                    if not next_line.strip().startswith("// -"):
+                        if not code_started:
+                            current_section.append("\nFunction Code:")
+                            code_started = True
+                        current_section.append(next_line)
+                
+            else:
+                i += 1
         
-        # Add final section if exists
+        # Add final section if it exists
         if current_section:
             sections.append('\n'.join(current_section))
         
-        return sections
+        return [s for s in sections if self._is_valid_section(s)]
+
+    def _is_valid_section(self, section):
+        """Validate if a section should be included in the findings"""
+        if not section:
+            return False
+            
+        lines = section.split('\n')
+        has_detection = False
+        has_evidence = False
+        has_code = False
+        
+        for line in lines:
+            if "SECURITY/CRYPTO FUNCTION DETECTED" in line:
+                has_detection = True
+            elif line.strip().startswith("// -"):
+                has_evidence = True
+            elif "Function Code:" in line:
+                has_code = True
+                
+        # Must have detection header and either evidence or code
+        return has_detection and (has_evidence or has_code)
 
     def _group_similar_sections(self, sections):
         """Group similar crypto findings by category"""
@@ -1473,7 +1517,7 @@ Answer format: YES/NO followed by explanation of security-relevant features foun
             if not section.strip():
                 continue
                 
-            # Determine category based on content
+            # Determine category based on evidence and code content
             if any(x in section.lower() for x in ['key gen', 'keygen', 'key schedule']):
                 grouped['Key Generation'].append(section)
             elif any(x in section.lower() for x in ['encrypt', 'decrypt', 'cipher']):
@@ -1503,7 +1547,8 @@ Answer format: YES/NO followed by explanation of security-relevant features foun
         text_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
         refined_text = scrolledtext.ScrolledText(text_frame, wrap=tk.WORD, 
-                                               width=80, height=40)
+                                               width=80, height=40,
+                                               font=('Courier', 10))  # Monospace font for code
         refined_text.pack(fill=tk.BOTH, expand=True)
         
         # Extract and group crypto sections
