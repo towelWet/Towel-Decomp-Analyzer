@@ -263,36 +263,64 @@ Comment:"""
         # Crypto findings panel
         crypto_frame = ttk.LabelFrame(panels_frame, text="Crypto Findings")
         crypto_frame.grid(row=0, column=2, sticky='nsew', padx=2)
-        self.crypto_text = scrolledtext.ScrolledText(crypto_frame)
-        self.crypto_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
-        # Button frame
+        # Search for crypto findings
+        crypto_search_frame = ttk.Frame(crypto_frame)
+        crypto_search_frame.grid(row=0, column=0, sticky='ew', padx=5, pady=2)
+        
+        self.crypto_search_var = tk.StringVar()
+        self.crypto_search_entry = ttk.Entry(crypto_search_frame, textvariable=self.crypto_search_var)
+        self.crypto_search_entry.grid(row=0, column=0, sticky='ew', padx=2)
+        
+        ttk.Button(crypto_search_frame, text="Find",
+                   command=lambda: self.find_text(self.crypto_text, self.crypto_search_var.get())).grid(row=0, column=1, padx=2)
+        ttk.Button(crypto_search_frame, text="Next",
+                   command=lambda: self.find_text(self.crypto_text, self.crypto_search_var.get(), next=True)).grid(row=0, column=2, padx=2)
+        crypto_search_frame.grid_columnconfigure(0, weight=1)
+        
+        # Crypto text area
+        self.crypto_text = scrolledtext.ScrolledText(crypto_frame, height=20, width=60)
+        self.crypto_text.grid(row=1, column=0, sticky='nsew', padx=5, pady=5)
+        
+        # Configure text frame weights for three columns
+        crypto_frame.grid_columnconfigure(0, weight=1)
+        crypto_frame.grid_columnconfigure(1, weight=1)
+        crypto_frame.grid_columnconfigure(2, weight=1)
+        
+        # Buttons frame
         button_frame = ttk.Frame(self)
         button_frame.grid(row=4, column=0, columnspan=2, sticky='ew', padx=5, pady=5)
         
-        # Fix analyze button to use non-AI by default
+        # Initialize analyze button with pattern-based analysis by default
         self.analyze_btn = ttk.Button(
             button_frame, 
             text="Analyze Code", 
-            command=self.analyze_code  # Default to non-AI analysis
+            command=self.analyze_code  # Start with pattern-based analysis
         )
         self.analyze_btn.grid(row=0, column=0, padx=5)
         
-        # Add AI checkbox
-        self.use_ai = tk.BooleanVar(value=False)
-        ai_check = ttk.Checkbutton(
-            settings_frame, 
-            text="Use AI Analysis", 
-            variable=self.use_ai,
-            command=self._update_analyze_command  # Add callback to update button command
+        # Add Find Crypto button
+        self.find_crypto_btn = ttk.Button(
+            button_frame,
+            text="Find Crypto",
+            command=self.find_crypto_functions
         )
-        ai_check.grid(row=0, column=2, padx=5, pady=2)
+        self.find_crypto_btn.grid(row=0, column=1, padx=5)
         
-        self.crypto_btn = ttk.Button(button_frame, text="Find Crypto", command=self.analyze_crypto)
-        self.crypto_btn.grid(row=1, column=0, padx=5)
+        # Add Refine button
+        self.refine_btn = ttk.Button(
+            button_frame,
+            text="Refine Findings",
+            command=self.show_refined_findings,
+            state='disabled'  # Disabled until crypto is found
+        )
+        self.refine_btn.grid(row=0, column=2, padx=5)
         
-        ttk.Button(button_frame, text="Save Output", command=self.save_output).grid(row=1, column=1, padx=5)
-        ttk.Button(button_frame, text="Clear", command=self.clear_analysis).grid(row=2, column=0, columnspan=2, padx=5)
+        self.save_btn = ttk.Button(button_frame, text="Save Output", command=self.save_output)
+        self.save_btn.grid(row=0, column=3, padx=5)
+        
+        self.clear_btn = ttk.Button(button_frame, text="Clear", command=self.clear_all)
+        self.clear_btn.grid(row=0, column=4, padx=5)
         
         # Log frame
         log_frame = ttk.LabelFrame(self, text="Processing Log")
@@ -302,7 +330,7 @@ Comment:"""
 
     def _update_analyze_command(self):
         """Update analyze button command based on AI checkbox"""
-        if self.use_ai.get():
+        if self.use_ai_var.get():
             self.analyze_btn.config(
                 command=self.analyze_with_deepseek,
                 text="Analyze with AI"
@@ -745,23 +773,83 @@ Comment:"""
                 self.log_message(f"Error loading file: {str(e)}", error=True)
 
     def save_output(self):
-        """Save analysis results to file"""
+        """Save output with option to choose which content to save"""
         try:
+            # Create selection dialog
+            dialog = tk.Toplevel(self.root)
+            dialog.title("Save Output")
+            dialog.geometry("300x150")
+            dialog.transient(self.root)
+            dialog.grab_set()
+            
+            # Center the dialog
+            dialog.geometry("+%d+%d" % (
+                self.root.winfo_rootx() + self.root.winfo_width()/2 - 150,
+                self.root.winfo_rooty() + self.root.winfo_height()/2 - 75
+            ))
+            
+            # Add label
+            ttk.Label(dialog, text="Select content to save:").pack(pady=10)
+            
+            # Add radio buttons
+            save_type = tk.StringVar(value="commented")
+            ttk.Radiobutton(
+                dialog, 
+                text="Commented Code", 
+                value="commented", 
+                variable=save_type
+            ).pack(pady=5)
+            
+            ttk.Radiobutton(
+                dialog, 
+                text="Crypto Findings", 
+                value="crypto", 
+                variable=save_type
+            ).pack(pady=5)
+            
+            # Add save button
+            def do_save():
+                dialog.destroy()
+                if save_type.get() == "commented":
+                    self._save_content(self.commented_text)
+                else:
+                    self._save_content(self.crypto_text)
+                    
+            ttk.Button(
+                dialog, 
+                text="Save", 
+                command=do_save
+            ).pack(pady=10)
+            
+        except Exception as e:
+            self.log_message(f"Error in save dialog: {str(e)}", error=True)
+
+    def _save_content(self, text_widget):
+        """Save content from specified text widget"""
+        try:
+            content = text_widget.get("1.0", tk.END)
+            if not content.strip():
+                messagebox.showwarning("Warning", "No content to save!")
+                return
+                
             file_path = filedialog.asksaveasfilename(
                 defaultextension=".txt",
-                filetypes=[("Text files", "*.txt"), ("All files", "*.*")]
+                filetypes=[
+                    ("Text files", "*.txt"),
+                    ("Log files", "*.log"),
+                    ("All files", "*.*")
+                ]
             )
+            
             if file_path:
                 with open(file_path, 'w', encoding='utf-8') as f:
-                    f.write("=== COMMENTED CODE ===\n")
-                    f.write(self.commented_text.get("1.0", tk.END))
-                    f.write("\n=== CRYPTO FINDINGS ===\n")
-                    f.write(self.crypto_text.get("1.0", tk.END))
-                self.log_message(f"Results saved to {file_path}")
+                    f.write(content)
+                self.log_message(f"Content saved to: {file_path}")
+                
         except Exception as e:
-            self.log_message(f"Error saving results: {str(e)}", error=True)
+            self.log_message(f"Error saving content: {str(e)}", error=True)
 
-    def clear_analysis(self):
+    def clear_all(self):
         """Clear all analysis results"""
         self.original_text.delete("1.0", tk.END)
         self.commented_text.delete("1.0", tk.END)
@@ -1172,35 +1260,83 @@ Comment:"""
         return line
 
     def analyze_function_block(self, code_block):
-        """Intelligent analysis for both high-level and assembly code"""
+        """Analyze a function block for cryptographic operations"""
+        # Convert list to string if needed
         if isinstance(code_block, list):
-            code_text = ''.join(code_block)
-            lines = code_block
-        else:
-            code_text = code_block
-            lines = code_text.split('\n')
-
-        # Determine if this is assembly code
-        is_assembly = self._is_assembly_code(lines[:10])
-        
-        evidence = []
-        score = 0
-        
-        if is_assembly:
-            is_crypto, asm_evidence, asm_score = self._analyze_assembly(lines)
-            evidence.extend(asm_evidence)
-            score += asm_score
-        else:
-            is_crypto, hlc_evidence, hlc_score = self._analyze_high_level(lines)
-            evidence.extend(hlc_evidence)
-            score += hlc_score
+            code_block = '\n'.join(code_block)
             
-        if score >= 4:
-            self.log_message(f"Crypto detection score: {score}")
-            for ev in evidence:
-                self.log_message(f"Evidence: {ev}")
-                
-        return score >= 4 or is_crypto, evidence, score
+        # Crypto-related patterns
+        patterns = {
+            'key_generation': [
+                r'(?i)(generate|create|init).*?(key|secret|token|iv|nonce)',
+                r'(?i)(key\s*=|secret\s*=|token\s*=)',
+                r'(?i)(random|rand).*?(key|iv|salt)',
+                r'(?i)key(gen|generation|schedule)',
+            ],
+            'encryption': [
+                r'(?i)(encrypt|decrypt|cipher)',
+                r'(?i)(AES|DES|RSA|RC4|Blowfish)',
+                r'(?i)(CBC|ECB|GCM|CTR|OFB|CFB)',
+                r'(?i)(block.*?cipher|stream.*?cipher)',
+            ],
+            'hashing': [
+                r'(?i)(hash|digest|SHA|MD5|HMAC)',
+                r'(?i)(SHA\-?1|SHA\-?2|SHA\-?256|SHA\-?512)',
+                r'(?i)(blake2|keccak|whirlpool)',
+            ],
+            'random': [
+                r'(?i)(random|rand).*?(bytes|number|generator)',
+                r'(?i)(PRNG|RNG|CSPRNG)',
+                r'(?i)(urandom|CryptGenRandom)',
+            ],
+            'bit_operations': [
+                r'(?i)(xor|rotate|shift).*?(left|right|bits?)',
+                r'(?i)(bit.*?manipulation|bit.*?operation)',
+                r'(?i)(sbox|substitution.*?box)',
+                r'(?i)(permutation|transposition)',
+            ]
+        }
+        
+        score = 0
+        evidence = []
+        
+        # Check each pattern category
+        for category, pattern_list in patterns.items():
+            for pattern in pattern_list:
+                matches = re.findall(pattern, code_block)
+                if matches:
+                    score += len(matches)
+                    evidence.append(f"Found {category} pattern: {matches[0]}")
+        
+        # Check for suspicious variable names
+        suspicious_vars = re.findall(r'(?i)(?:^|\s)(key|iv|nonce|salt|cipher|hash|crypt)(?:$|\s|[0-9])', code_block)
+        if suspicious_vars:
+            score += len(suspicious_vars)
+            evidence.append(f"Suspicious variable names: {', '.join(suspicious_vars)}")
+        
+        # Check for bit manipulation operations
+        bit_ops = re.findall(r'(?i)(?:<<|>>|\^|\||\&|\~)', code_block)
+        if bit_ops:
+            score += len(bit_ops)
+            evidence.append(f"Bit manipulation operations found: {len(bit_ops)} occurrences")
+        
+        # Check for large number operations (common in crypto)
+        if re.search(r'0x[0-9A-Fa-f]{8,}', code_block):
+            score += 2
+            evidence.append("Large hexadecimal constants found")
+        
+        # Check for array/matrix operations (common in crypto)
+        if re.search(r'\[\s*\d+\s*\]\s*\[\s*\d+\s*\]', code_block):
+            score += 2
+            evidence.append("Matrix operations detected")
+        
+        # Store evidence for later use
+        if evidence:
+            self.evidence.extend(evidence)
+        
+        # Return tuple of (is_crypto, evidence, score)
+        is_crypto = score >= 2
+        return (is_crypto, evidence, score)
 
     def _is_assembly_code(self, lines):
         """Detect if code is assembly based on initial lines"""
@@ -1538,276 +1674,65 @@ Answer format: YES/NO followed by explanation of security-relevant features foun
                 messagebox.showinfo("Find", f"Cannot find '{search_text}'")
 
     def show_refined_findings(self):
-        """Show dialog to choose refinement source"""
-        choice = messagebox.askyesnocancel(
-            "Refine Findings",
-            "Would you like to refine:\n\n"
-            "Yes - Current analysis\n"
-            "No - Load external findings file\n"
-            "Cancel - Cancel operation"
-        )
-        
-        if choice is None:  # Cancel
-            return
-        elif choice:  # Yes - Current analysis
-            self._show_refinement_window(self.commented_text.get(1.0, tk.END))
-        else:  # No - Load file
-            file_path = filedialog.askopenfilename(
-                filetypes=[
-                    ("All files", "*.*"),  # All files first
-                    ("Text files", "*.txt"),
-                    ("Analysis files", "*.analysis"),
-                    ("Log files", "*.log")
-                ],
-                defaultextension="*.*",  # Default to all files
-                title="Select Findings File to Refine"
-            )
-            if file_path:
-                try:
-                    with open(file_path, 'r', encoding='utf-8') as f:
-                        content = f.read()
-                    self._show_refinement_window(content)
-                except UnicodeDecodeError:
-                    # Try alternative encoding if UTF-8 fails
-                    try:
-                        with open(file_path, 'r', encoding='latin-1') as f:
-                            content = f.read()
-                        self._show_refinement_window(content)
-                    except Exception as e:
-                        messagebox.showerror("Error", f"Error loading file: {str(e)}")
-                except Exception as e:
-                    messagebox.showerror("Error", f"Error loading file: {str(e)}")
-
-    def _extract_crypto_sections(self, content):
-        """Extract crypto sections from both assembly and high-level code"""
-        sections = []
-        current_section = []
-        in_crypto_section = False
-        current_function_code = []
-        
-        # Split content into lines for analysis
-        lines = content.split('\n')
-        i = 0
-        
-        while i < len(lines):
-            line = lines[i]
-            
-            # Detect start of crypto section
-            if "// SECURITY/CRYPTO FUNCTION DETECTED" in line or any(marker in line for marker in [
-                "KEY GENERATION FUNCTION DETECTED",
-                "CRYPTO FINDINGS SUMMARY",
-                "; Cryptographic Operation Detected",
-                "; Security-Critical Function"
-            ]):
-                # Save previous section if it exists
-                if current_section:
-                    sections.append('\n'.join(current_section))
-                
-                current_section = [line]
-                current_function_code = []
-                in_crypto_section = True
-                
-                # Collect header (including score and evidence header)
-                while i + 1 < len(lines) and "// Evidence:" not in lines[i + 1]:
-                    i += 1
-                    current_section.append(lines[i])
-                
-                if i + 1 < len(lines):
-                    current_section.append(lines[i + 1])  # Add "// Evidence:" line
-                    i += 1
-                
-                # Collect evidence (avoiding duplicate IV findings)
-                seen_iv = False
-                while i + 1 < len(lines) and lines[i + 1].strip().startswith("// -"):
-                    i += 1
-                    if "Initialization vector usage" in lines[i]:
-                        if not seen_iv:
-                            current_section.append(lines[i])
-                            seen_iv = True
-                    else:
-                        current_section.append(lines[i])
-                
-                # Collect function code until next section or end marker
-                code_started = False
-                while i + 1 < len(lines):
-                    i += 1
-                    next_line = lines[i]
-                    
-                    # Stop at next section marker
-                    if "// SECURITY/CRYPTO FUNCTION DETECTED" in next_line:
-                        i -= 1  # Back up to process this marker in next iteration
-                        break
-                        
-                    # Skip empty lines at the start of code
-                    if not code_started and not next_line.strip():
-                        continue
-                        
-                    # Add code line
-                    if not next_line.strip().startswith("// -"):
-                        if not code_started:
-                            current_section.append("\nFunction Code:")
-                            code_started = True
-                        current_section.append(next_line)
-                
-            else:
-                i += 1
-        
-        # Add final section if it exists
-        if current_section:
-            sections.append('\n'.join(current_section))
-        
-        return [s for s in sections if self._is_valid_section(s)]
-
-    def _is_valid_section(self, section):
-        """Validate if a section should be included in the findings"""
-        if not section:
-            return False
-            
-        lines = section.split('\n')
-        has_detection = False
-        has_evidence = False
-        has_code = False
-        
-        for line in lines:
-            if "SECURITY/CRYPTO FUNCTION DETECTED" in line:
-                has_detection = True
-            elif line.strip().startswith("// -"):
-                has_evidence = True
-            elif "Function Code:" in line:
-                has_code = True
-                
-        # Must have detection header and either evidence or code
-        return has_detection and (has_evidence or has_code)
-
-    def _group_similar_sections(self, sections):
-        """Group similar crypto findings by category"""
-        grouped = {
-            'Key Generation': [],
-            'Encryption/Decryption': [],
-            'Hash Functions': [],
-            'Random Number Generation': [],
-            'S-Box Operations': [],
-            'Block Cipher Operations': [],
-            'Other Crypto Operations': []
-        }
-        
-        for section in sections:
-            # Skip empty sections
-            if not section.strip():
-                continue
-                
-            # Determine category based on evidence and code content
-            if any(x in section.lower() for x in ['key gen', 'keygen', 'key schedule']):
-                grouped['Key Generation'].append(section)
-            elif any(x in section.lower() for x in ['encrypt', 'decrypt', 'cipher']):
-                grouped['Encryption/Decryption'].append(section)
-            elif any(x in section.lower() for x in ['hash', 'sha', 'md5']):
-                grouped['Hash Functions'].append(section)
-            elif any(x in section.lower() for x in ['random', 'rand', 'prng']):
-                grouped['Random Number Generation'].append(section)
-            elif any(x in section.lower() for x in ['sbox', 'lookup table']):
-                grouped['S-Box Operations'].append(section)
-            elif any(x in section.lower() for x in ['block', '0x10', '0x20', '0x40']):
-                grouped['Block Cipher Operations'].append(section)
-            else:
-                grouped['Other Crypto Operations'].append(section)
-        
-        # Remove empty categories
-        return {k: v for k, v in grouped.items() if v}
-
-    def _show_refinement_window(self, content):
         """Show refined crypto findings in a new window"""
-        refine_window = tk.Toplevel(self.root)
-        refine_window.title("Refined Crypto Findings")
-        refine_window.geometry("1000x800")
-        
-        # Add text widget with scrollbar
-        text_frame = ttk.Frame(refine_window)
-        text_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-        
-        refined_text = scrolledtext.ScrolledText(text_frame, wrap=tk.WORD, 
-                                               width=80, height=40,
-                                               font=('Courier', 10))  # Monospace font for code
-        refined_text.pack(fill=tk.BOTH, expand=True)
-        
-        # Extract and group crypto sections
-        sections = self._extract_crypto_sections(content)
-        grouped_sections = self._group_similar_sections(sections)
-        
-        # Add summary header
-        refined_text.insert(tk.END, "=== CRYPTO FINDINGS SUMMARY ===\n\n")
-        refined_text.insert(tk.END, f"Total crypto functions found: {len(sections)}\n")
-        refined_text.insert(tk.END, f"Grouped into {len(grouped_sections)} categories\n\n")
-        
-        # Add statistics
-        stats = {
-            'Assembly Functions': len([s for s in sections if '; ' in s]),
-            'High-Level Functions': len([s for s in sections if '// ' in s]),
-            'Key Operations': len(grouped_sections.get('Key Generation', [])),
-            'Crypto Operations': sum(len(v) for k, v in grouped_sections.items() 
-                                   if k not in ['Key Generation', 'Other Crypto Operations'])
-        }
-        
-        refined_text.insert(tk.END, "Statistics:\n")
-        for stat, value in stats.items():
-            refined_text.insert(tk.END, f"{stat}: {value}\n")
-        refined_text.insert(tk.END, "\n")
-        
-        # Add each group
-        for category, group in grouped_sections.items():
-            refined_text.insert(tk.END, f"\n{'='*50}\n")
-            refined_text.insert(tk.END, f"Category: {category}\n")
-            refined_text.insert(tk.END, f"Found {len(group)} related functions\n")
-            refined_text.insert(tk.END, f"{'='*50}\n\n")
-            
-            for section in group:
-                refined_text.insert(tk.END, section)
-                refined_text.insert(tk.END, "\n" + "-"*50 + "\n\n")
-        
-        # Add buttons frame
-        btn_frame = ttk.Frame(refine_window)
-        btn_frame.pack(fill=tk.X, padx=5, pady=5)
-        
-        # Add save button
-        save_btn = ttk.Button(btn_frame, text="Save Summary",
-                             command=lambda: self._save_refined_findings(refined_text.get(1.0, tk.END)))
-        save_btn.pack(side=tk.RIGHT, padx=5)
-        
-        # Add copy button
-        copy_btn = ttk.Button(btn_frame, text="Copy to Clipboard",
-                             command=lambda: self.root.clipboard_append(refined_text.get(1.0, tk.END)))
-        copy_btn.pack(side=tk.RIGHT, padx=5)
-
-    def _save_refined_findings(self, content):
-        """Save refined findings to a file"""
         try:
-            # Get file path from user
+            content = self.commented_text.get("1.0", tk.END)
+            if not content.strip():
+                messagebox.showwarning("Warning", "No findings to refine!")
+                return
+                
+            # Create new window
+            refine_window = tk.Toplevel(self.root)
+            refine_window.title("Refined Crypto Findings")
+            refine_window.geometry("1000x800")
+            
+            # Add text widget with scrollbar
+            text_frame = ttk.Frame(refine_window)
+            text_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+            
+            refined_text = scrolledtext.ScrolledText(
+                text_frame, 
+                wrap=tk.WORD,
+                width=80, 
+                height=40,
+                font=('Courier', 10)
+            )
+            refined_text.pack(fill=tk.BOTH, expand=True)
+            
+            # Add the content
+            refined_text.insert(tk.END, content)
+            
+            # Add save button
+            save_btn = ttk.Button(
+                refine_window, 
+                text="Save Findings",
+                command=lambda: self.save_findings(refined_text.get("1.0", tk.END))
+            )
+            save_btn.pack(pady=5)
+            
+        except Exception as e:
+            self.log_message(f"Error showing findings: {str(e)}", error=True)
+
+    def save_findings(self, content):
+        """Save findings to a file"""
+        try:
             file_path = filedialog.asksaveasfilename(
                 defaultextension=".txt",
                 filetypes=[
+                    ("All files", "*.*"),
                     ("Text files", "*.txt"),
-                    ("Log files", "*.log"),
-                    ("All files", "*.*")
+                    ("Log files", "*.log")
                 ],
-                title="Save Crypto Findings Summary",
-                initialfile="crypto_findings_summary.txt"
+                title="Save Refined Findings"
             )
             
             if file_path:
-                # Add timestamp to the content
-                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                header = f"Crypto Findings Summary\nGenerated: {timestamp}\n{'='*50}\n\n"
-                
-                # Write content to file
                 with open(file_path, 'w', encoding='utf-8') as f:
-                    f.write(header + content)
-                
+                    f.write(content)
                 self.log_message(f"Findings saved to: {file_path}")
-                messagebox.showinfo("Success", "Findings saved successfully!")
                 
         except Exception as e:
             self.log_message(f"Error saving findings: {str(e)}", error=True)
-            messagebox.showerror("Error", f"Failed to save findings: {str(e)}")
 
     def process_file(self, content):
         """Process file content using parallel processing"""
@@ -2471,6 +2396,70 @@ Comments:"""
                 self.crypto_text.insert(tk.END, "No crypto-related code sections found.")
             
             self.log_message("Crypto analysis complete!")
+            
+        except Exception as e:
+            self.log_message(f"Crypto analysis failed: {str(e)}", error=True)
+            import traceback
+            self.log_message(traceback.format_exc(), error=True)
+
+    def find_crypto_functions(self):
+        """Find cryptographic functions in the code"""
+        try:
+            content = self.original_text.get("1.0", tk.END)
+            if not content.strip():
+                self.log_message("No code to analyze!", error=True)
+                return
+                
+            self.log_message("Starting crypto analysis...")
+            self.evidence = []  # Reset evidence list
+            
+            # Split into potential function blocks
+            lines = content.split('\n')
+            current_function = []
+            crypto_findings = []  # Separate list for crypto findings
+            in_function = False
+            
+            for line in lines:
+                stripped = line.strip()
+                
+                # Check for function start
+                if re.match(r'(?i)(\w+\s+)*(\w+)\s*\([^)]*\)\s*{', stripped):
+                    in_function = True
+                    current_function = [line]
+                # Inside function
+                elif in_function:
+                    current_function.append(line)
+                    if stripped == '}':
+                        # Analyze complete function
+                        is_crypto, evidence, score = self.analyze_function_block(''.join(current_function))
+                        
+                        # Add crypto header if detected
+                        if is_crypto:
+                            crypto_findings.append("\n// ==========================================")
+                            crypto_findings.append("// SECURITY/CRYPTO FUNCTION DETECTED")
+                            crypto_findings.append("// Evidence:")
+                            for e in evidence:
+                                crypto_findings.append(f"// - {e}")
+                            crypto_findings.append("// ==========================================\n")
+                            crypto_findings.extend(current_function)
+                            crypto_findings.append("\n// =========== END SECURITY FUNCTION ===========\n")
+                        
+                        current_function = []
+                        in_function = False
+            
+            if self.evidence:
+                self.log_message(f"Found {len(self.evidence)} potential crypto indicators")
+                self.refine_btn.config(state='normal')  # Enable refine button
+                
+                # Update the crypto findings text widget (right panel)
+                if hasattr(self, 'crypto_text'):
+                    self.crypto_text.delete("1.0", tk.END)
+                    self.crypto_text.insert("1.0", '\n'.join(crypto_findings))
+            else:
+                self.log_message("No crypto functions detected")
+                self.refine_btn.config(state='disabled')
+                if hasattr(self, 'crypto_text'):
+                    self.crypto_text.delete("1.0", tk.END)
             
         except Exception as e:
             self.log_message(f"Crypto analysis failed: {str(e)}", error=True)
