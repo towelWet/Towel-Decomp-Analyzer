@@ -601,41 +601,71 @@ Comment:"""
 
     @lru_cache(maxsize=2000)
     def process_single_line(self, line):
-        """Process assembly line with specific assembly knowledge"""
+        """Process assembly line with enhanced crypto detection"""
         try:
             if not line or line.startswith('//'):
                 return line
             
-            # Clean and parse the assembly line
             stripped = line.strip()
             if not stripped:
                 return line
             
-            # Handle stack frame variable declarations
-            if '=' in stripped and 'ptr' in stripped:
-                match = re.match(r'(\w+)=\s*(\w+)\s+ptr\s+([^;\n]+)', stripped)
-                if match:
-                    var_name, var_type, offset = match.groups()
-                    
-                    # Determine variable size
-                    size_map = {
-                        'qword': '64-bit',
-                        'dword': '32-bit',
-                        'word': '16-bit',
-                        'byte': '8-bit'
-                    }
-                    size = next((size_map[k] for k in size_map if k in var_type.lower()), 'unknown-size')
-                    
-                    # Determine if it's a parameter or local variable
-                    if var_name.startswith('arg_'):
-                        offset_val = int(offset.strip('h'), 16) if 'h' in offset else int(offset)
-                        return f"{stripped:<40}// Input parameter #{offset_val//8} ({size})\n"
-                    else:
-                        # Local variable with negative offset from frame pointer
-                        offset_val = int(offset.strip('h'), 16) if 'h' in offset else int(offset)
-                        return f"{stripped:<40}// Local {size} variable at frame offset -{abs(offset_val)}h\n"
+            # Enhanced crypto pattern detection with fixed regex patterns
+            crypto_patterns = {
+                # Key schedule / key expansion patterns
+                'key_schedule': (
+                    r'(?i)(movzx|movsx|xor|shl|shr|rol|ror).*?(key|schedule|sbox)',
+                    "Possible key schedule operation"
+                ),
+                # S-box operations
+                'sbox': (
+                    r'(?i)mov[zx]?x?\s+\w+,\s*(\[)?(sbox|table|lookup)',
+                    "S-box lookup operation"
+                ),
+                # Round function patterns
+                'round_ops': (
+                    r'(?i)(xor|add|sub).*?(round|state|block)',
+                    "Cryptographic round operation"
+                ),
+                # Bit manipulation common in crypto
+                'bit_ops': (
+                    r'(rol|ror|rcl|rcr|shl|shr).*?(?:0x[0-9a-fA-F]+|\d+)',
+                    "Bit rotation/shift - possible crypto operation"
+                ),
+                # Key material handling
+                'key_ops': (
+                    r'(?i)(mov|lea).*?(key|iv|nonce|salt)',
+                    "Key material manipulation"
+                ),
+                # Buffer operations with specific sizes (common in block ciphers)
+                'block_ops': (
+                    r'(?i)(mov|lea).*?\[.*?(?:0x10|0x20|0x40)',
+                    "Block cipher operation (16/32/64 byte blocks)"
+                ),
+                # Random number generation
+                'random': (
+                    r'(?i)(rdrand|rdseed|xor.*?rand)',
+                    "Hardware random number generation"
+                ),
+                # Hash function patterns
+                'hash': (
+                    r'(?i)(sha|md5|hash).*?(state|block|digest)',
+                    "Hash function operation"
+                ),
+                # Whitening or mixing operations
+                'mixing': (
+                    r'(?i)(xor|add).*?(?:0x[0-9a-fA-F]{8}|0x[0-9a-fA-F]{16})',
+                    "Data mixing with constants - possible crypto"
+                )
+            }
             
-            # Handle common assembly instructions
+            # Check for crypto patterns
+            for pattern_name, (pattern, desc) in crypto_patterns.items():
+                if re.search(pattern, stripped):
+                    padding = max(1, 40 - len(stripped))
+                    return f"{stripped}{' ' * padding}// {desc}\n"
+            
+            # Handle common assembly instructions if no crypto pattern found
             parts = stripped.lower().split()
             if not parts:
                 return line
@@ -643,7 +673,7 @@ Comment:"""
             instruction = parts[0]
             operands = ' '.join(parts[1:])
             
-            # Instruction-specific analysis
+            # Basic instruction analysis (existing code)
             if instruction == 'mov':
                 if '[rsp' in operands or '[rbp' in operands:
                     reg = operands.split(',')[1].strip()
@@ -654,7 +684,7 @@ Comment:"""
                     src = operands.split(',')[1].strip()
                     dst = operands.split(',')[0].strip()
                     return f"{stripped:<40}// Move {src} into {dst}\n"
-                
+            
             elif instruction == 'push':
                 reg = operands.strip()
                 return f"{stripped:<40}// Push {reg} onto stack\n"
@@ -963,85 +993,211 @@ Comment:"""
         return line
 
     def analyze_function_block(self, code_block):
-        """Analyze and comment a function block with improved detection"""
-        # Handle both string and list input
+        """Intelligent analysis for both high-level and assembly code"""
         if isinstance(code_block, list):
             code_text = ''.join(code_block)
             lines = code_block
         else:
             code_text = code_block
-            lines = code_block.split('\n')
+            lines = code_text.split('\n')
+
+        # Determine if this is assembly code
+        is_assembly = self._is_assembly_code(lines[:10])
         
-        commented_lines = []
+        evidence = []
+        score = 0
         
-        # Key generation specific patterns - simplified and more focused
-        key_indicators = {
-            'key_buffer': re.compile(r'(?i)(key.*buffer|buffer.*key|\*key|key\[|key_length)'),
-            'key_gen': re.compile(r'(?i)(generate|create|make).*key'),
-            'random': re.compile(r'(?i)(random|rand|rng)'),
-            'validation': re.compile(r'(?i)(validate|verify|check).*key'),
-            'error_return': re.compile(r'return.*0x[fF]+'),
-            'buffer_ops': re.compile(r'\[\s*[i]\s*\]\s*='),
+        if is_assembly:
+            is_crypto, asm_evidence, asm_score = self._analyze_assembly(lines)
+            evidence.extend(asm_evidence)
+            score += asm_score
+        else:
+            is_crypto, hlc_evidence, hlc_score = self._analyze_high_level(lines)
+            evidence.extend(hlc_evidence)
+            score += hlc_score
+            
+        if score >= 4:
+            self.log_message(f"Crypto detection score: {score}")
+            for ev in evidence:
+                self.log_message(f"Evidence: {ev}")
+                
+        return score >= 4 or is_crypto, evidence, score
+
+    def _is_assembly_code(self, lines):
+        """Detect if code is assembly based on initial lines"""
+        asm_indicators = {
+            'mov', 'push', 'pop', 'lea', 'call', 'ret', 'jmp', 
+            'xor', 'and', 'or', 'shl', 'shr', 'rol', 'ror'
         }
         
-        # Simple scoring - if we match 2 or more patterns, it's likely key generation
-        matches = []
-        for name, pattern in key_indicators.items():
-            if pattern.search(code_text):
-                matches.append(name)
-        
-        is_key_gen = len(matches) >= 2
-        score = len(matches)
-        
-        # If we found key generation code, add the header BEFORE processing lines
-        if is_key_gen:
-            commented_lines = [
-                "",
-                "// ===== KEY GENERATION SEGMENT DETECTED =====",
-                "// This function appears to be generating cryptographic keys",
-                "// Detected patterns: " + ", ".join(matches),
-                "// Exercise caution when modifying this code",
-                "// ============================================",
-                ""
-            ]
-        
-        # Process each line with comments
+        asm_line_count = 0
         for line in lines:
-            stripped = line.strip()
-            if not stripped:
-                commented_lines.append(line)
+            tokens = line.strip().lower().split()
+            if tokens and tokens[0] in asm_indicators:
+                asm_line_count += 1
+                
+        return asm_line_count >= 3
+
+    def _analyze_high_level(self, lines):
+        """Analyze high-level code for cryptographic operations"""
+        evidence = []
+        score = 0
+        
+        # High-level crypto indicators
+        crypto_functions = {
+            'encrypt': 'Encryption function',
+            'decrypt': 'Decryption function',
+            'generatekey': 'Key generation',
+            'derivekey': 'Key derivation',
+            'hash': 'Hash function',
+            'hmac': 'HMAC operation',
+            'sign': 'Digital signature',
+            'verify': 'Signature verification',
+            'random': 'Random number generation',
+            'cipher': 'Cipher operation'
+        }
+        
+        crypto_types = {
+            'aes': 'AES algorithm',
+            'des': 'DES algorithm',
+            'rsa': 'RSA algorithm',
+            'sha': 'SHA hash',
+            'md5': 'MD5 hash',
+            'key': 'Cryptographic key',
+            'iv': 'Initialization vector',
+            'nonce': 'Cryptographic nonce',
+            'salt': 'Cryptographic salt'
+        }
+        
+        # Context tracking
+        has_crypto_imports = False
+        has_key_ops = False
+        has_crypto_vars = False
+        
+        for line in lines:
+            stripped = line.strip().lower()
+            
+            # Check for crypto-related imports
+            if 'import' in stripped and any(x in stripped for x in ['crypto', 'cipher', 'security']):
+                has_crypto_imports = True
+                evidence.append("Crypto-related import found")
+                score += 2
+            
+            # Check for crypto function names
+            for func, desc in crypto_functions.items():
+                if func in stripped.replace('_', '').replace(' ', ''):
+                    evidence.append(f"Found {desc}")
+                    score += 2
+                    if 'key' in func:
+                        has_key_ops = True
+            
+            # Check for crypto types/variables
+            for type_name, desc in crypto_types.items():
+                if type_name in stripped:
+                    has_crypto_vars = True
+                    evidence.append(f"Found {desc} usage")
+                    score += 1
+        
+        is_crypto = (score >= 4 or 
+                    (has_crypto_imports and has_crypto_vars) or 
+                    (has_key_ops and has_crypto_vars))
+        
+        return is_crypto, evidence, score
+
+    def _analyze_assembly(self, lines):
+        """Analyze assembly code for cryptographic operations"""
+        evidence = []
+        score = 0
+        
+        # Track crypto patterns
+        key_ops = 0
+        bit_ops = 0
+        table_lookups = 0
+        block_ops = 0
+        
+        # Common crypto block sizes
+        block_sizes = {'0x10', '0x20', '0x40', '16', '32', '64'}
+        
+        # Crypto constants
+        crypto_constants = {
+            '0x63516358', '0x52525252',  # AES
+            '0x67452301', '0xefcdab89',  # SHA-1
+            '0x98badcfe', '0x10325476',
+            '0x0f0f0f0f', '0x55555555'   # DES
+        }
+        
+        consecutive_ops = 0
+        max_consecutive = 0
+        in_loop = False
+        
+        for line in lines:
+            stripped = line.strip().lower()
+            
+            # Reset consecutive counter on labels or directives
+            if ':' in stripped or stripped.startswith('.'):
+                consecutive_ops = 0
                 continue
+                
+            # Track loops
+            if any(x in stripped for x in ['loop', 'rep', 'jnz', 'jne']):
+                in_loop = True
             
-            # Add line-specific comments
-            comment = ""
-            if key_indicators['key_buffer'].search(stripped):
-                comment = "Key buffer operation"
-            elif key_indicators['key_gen'].search(stripped):
-                comment = "Key generation step"
-            elif key_indicators['random'].search(stripped):
-                comment = "Random number generation"
-            elif key_indicators['validation'].search(stripped):
-                comment = "Key validation"
-            elif key_indicators['error_return'].search(stripped):
-                comment = "Error handling"
-            elif key_indicators['buffer_ops'].search(stripped):
-                comment = "Buffer manipulation"
+            # Check for key operations
+            if any(x in stripped for x in ['key', 'schedule', 'sbox']):
+                key_ops += 1
+                consecutive_ops += 1
             
-            if comment:
-                padding = max(1, 40 - len(stripped))
-                commented_lines.append(f"{stripped}{' ' * padding}// {comment}")
-            else:
-                commented_lines.append(line)
+            # Check for bit manipulation
+            if any(x in stripped for x in ['rol', 'ror', 'shl', 'shr', 'xor']):
+                bit_ops += 1
+                consecutive_ops += 1
+            
+            # Check for table lookups
+            if '[' in stripped and ']' in stripped:
+                table_lookups += 1
+                consecutive_ops += 1
+            
+            # Check for block operations
+            if any(size in stripped for size in block_sizes):
+                block_ops += 1
+                consecutive_ops += 1
+            
+            # Check for crypto constants
+            if any(const in stripped for const in crypto_constants):
+                evidence.append("Cryptographic constant found")
+                score += 2
+                consecutive_ops += 1
+            
+            max_consecutive = max(max_consecutive, consecutive_ops)
         
-        # Add footer if this was key generation code
-        if is_key_gen:
-            commented_lines.extend([
-                "",
-                "// ===== END OF KEY GENERATION SEGMENT =====",
-                ""
-            ])
+        # Score the patterns
+        if key_ops > 0:
+            evidence.append(f"Found {key_ops} key operations")
+            score += key_ops
+            
+        if bit_ops >= 3:
+            evidence.append(f"Found {bit_ops} bit manipulation operations")
+            score += 2
+            
+        if table_lookups >= 3:
+            evidence.append(f"Found {table_lookups} table lookups")
+            score += 2
+            
+        if block_ops > 0:
+            evidence.append(f"Found {block_ops} crypto block size operations")
+            score += block_ops
+            
+        if max_consecutive >= 4:
+            evidence.append("Found sequence of crypto operations")
+            score += 2
+            
+        if in_loop:
+            evidence.append("Crypto operations in loop structure")
+            score += 1
         
-        return is_key_gen, matches, score
+        is_crypto = score >= 4 or max_consecutive >= 4 or (key_ops > 0 and bit_ops >= 2)
+        
+        return is_crypto, evidence, score
 
     def deep_analyze_function(self, code_block):
         """Use AI model for thorough cryptographic analysis"""
@@ -1243,6 +1399,99 @@ Answer format: YES/NO followed by explanation of security-relevant features foun
                 except Exception as e:
                     messagebox.showerror("Error", f"Error loading file: {str(e)}")
 
+    def _extract_crypto_sections(self, content):
+        """Extract crypto sections from both assembly and high-level code"""
+        sections = []
+        current_section = []
+        in_crypto_section = False
+        
+        # Split content into lines for analysis
+        lines = content.split('\n')
+        
+        for i, line in enumerate(lines):
+            # Detect start of crypto section
+            if any(marker in line for marker in [
+                "SECURITY/CRYPTO FUNCTION DETECTED",
+                "KEY GENERATION FUNCTION DETECTED",
+                "CRYPTO FINDINGS SUMMARY",
+                "// ==========================================",
+                "; Cryptographic Operation Detected",
+                "; Security-Critical Function"
+            ]):
+                if current_section:  # Save previous section if exists
+                    sections.append('\n'.join(current_section))
+                current_section = [line]
+                in_crypto_section = True
+                continue
+            
+            # Detect end of crypto section
+            if in_crypto_section and any(marker in line for marker in [
+                "END SECURITY FUNCTION",
+                "==========",
+                "; End Crypto Section"
+            ]):
+                current_section.append(line)
+                sections.append('\n'.join(current_section))
+                current_section = []
+                in_crypto_section = False
+                continue
+            
+            # Collect lines within crypto section
+            if in_crypto_section:
+                current_section.append(line)
+                
+                # Check for evidence in comments
+                if line.strip().startswith(('// Evidence:', '; Evidence:')):
+                    # Collect evidence and related code
+                    j = i + 1
+                    while j < len(lines) and j < i + 10:  # Look ahead up to 10 lines
+                        evidence_line = lines[j]
+                        if evidence_line.strip().startswith(('// -', '; -')):
+                            current_section.append(evidence_line)
+                        j += 1
+        
+        # Add final section if exists
+        if current_section:
+            sections.append('\n'.join(current_section))
+        
+        return sections
+
+    def _group_similar_sections(self, sections):
+        """Group similar crypto findings by category"""
+        grouped = {
+            'Key Generation': [],
+            'Encryption/Decryption': [],
+            'Hash Functions': [],
+            'Random Number Generation': [],
+            'S-Box Operations': [],
+            'Block Cipher Operations': [],
+            'Other Crypto Operations': []
+        }
+        
+        for section in sections:
+            # Skip empty sections
+            if not section.strip():
+                continue
+                
+            # Determine category based on content
+            if any(x in section.lower() for x in ['key gen', 'keygen', 'key schedule']):
+                grouped['Key Generation'].append(section)
+            elif any(x in section.lower() for x in ['encrypt', 'decrypt', 'cipher']):
+                grouped['Encryption/Decryption'].append(section)
+            elif any(x in section.lower() for x in ['hash', 'sha', 'md5']):
+                grouped['Hash Functions'].append(section)
+            elif any(x in section.lower() for x in ['random', 'rand', 'prng']):
+                grouped['Random Number Generation'].append(section)
+            elif any(x in section.lower() for x in ['sbox', 'lookup table']):
+                grouped['S-Box Operations'].append(section)
+            elif any(x in section.lower() for x in ['block', '0x10', '0x20', '0x40']):
+                grouped['Block Cipher Operations'].append(section)
+            else:
+                grouped['Other Crypto Operations'].append(section)
+        
+        # Remove empty categories
+        return {k: v for k, v in grouped.items() if v}
+
     def _show_refinement_window(self, content):
         """Show refined crypto findings in a new window"""
         refine_window = tk.Toplevel(self.root)
@@ -1266,6 +1515,20 @@ Answer format: YES/NO followed by explanation of security-relevant features foun
         refined_text.insert(tk.END, f"Total crypto functions found: {len(sections)}\n")
         refined_text.insert(tk.END, f"Grouped into {len(grouped_sections)} categories\n\n")
         
+        # Add statistics
+        stats = {
+            'Assembly Functions': len([s for s in sections if '; ' in s]),
+            'High-Level Functions': len([s for s in sections if '// ' in s]),
+            'Key Operations': len(grouped_sections.get('Key Generation', [])),
+            'Crypto Operations': sum(len(v) for k, v in grouped_sections.items() 
+                                   if k not in ['Key Generation', 'Other Crypto Operations'])
+        }
+        
+        refined_text.insert(tk.END, "Statistics:\n")
+        for stat, value in stats.items():
+            refined_text.insert(tk.END, f"{stat}: {value}\n")
+        refined_text.insert(tk.END, "\n")
+        
         # Add each group
         for category, group in grouped_sections.items():
             refined_text.insert(tk.END, f"\n{'='*50}\n")
@@ -1284,6 +1547,43 @@ Answer format: YES/NO followed by explanation of security-relevant features foun
         # Add save button
         save_btn = ttk.Button(btn_frame, text="Save Summary",
                              command=lambda: self._save_refined_findings(refined_text.get(1.0, tk.END)))
+        save_btn.pack(side=tk.RIGHT, padx=5)
+        
+        # Add copy button
+        copy_btn = ttk.Button(btn_frame, text="Copy to Clipboard",
+                             command=lambda: self.root.clipboard_append(refined_text.get(1.0, tk.END)))
+        copy_btn.pack(side=tk.RIGHT, padx=5)
+
+    def _save_refined_findings(self, content):
+        """Save refined findings to a file"""
+        try:
+            # Get file path from user
+            file_path = filedialog.asksaveasfilename(
+                defaultextension=".txt",
+                filetypes=[
+                    ("Text files", "*.txt"),
+                    ("Log files", "*.log"),
+                    ("All files", "*.*")
+                ],
+                title="Save Crypto Findings Summary",
+                initialfile="crypto_findings_summary.txt"
+            )
+            
+            if file_path:
+                # Add timestamp to the content
+                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                header = f"Crypto Findings Summary\nGenerated: {timestamp}\n{'='*50}\n\n"
+                
+                # Write content to file
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    f.write(header + content)
+                
+                self.log_message(f"Findings saved to: {file_path}")
+                messagebox.showinfo("Success", "Findings saved successfully!")
+                
+        except Exception as e:
+            self.log_message(f"Error saving findings: {str(e)}", error=True)
+            messagebox.showerror("Error", f"Failed to save findings: {str(e)}")
 
 def main():
     root = tk.Tk()
