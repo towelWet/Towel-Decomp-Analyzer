@@ -2484,6 +2484,139 @@ Comments:"""
         
         return evidence, findings
 
+    def find_des(self, function_text: str) -> tuple[list[str], int]:
+        """Detect DES implementation"""
+        evidence = []
+        score = 0
+        
+        # DES patterns
+        des_patterns = [
+            # Common DES identifiers
+            ('des', 'Found DES reference'),
+            ('DES', 'Found DES reference'),
+            ('Data Encryption Standard', 'Found DES reference'),
+            
+            # Key handling
+            ('des_key', 'Found DES key handling'),
+            ('key_schedule', 'Found key schedule'),
+            ('key_permutation', 'Found key permutation'),
+            ('subkey', 'Found subkey generation'),
+            
+            # Core operations
+            ('des_encrypt', 'Found DES encryption'),
+            ('des_decrypt', 'Found DES decryption'),
+            ('initial_permutation', 'Found initial permutation'),
+            ('final_permutation', 'Found final permutation'),
+            ('permuted_choice_1', 'Found PC1'),
+            ('permuted_choice_2', 'Found PC2'),
+            ('expansion_permutation', 'Found E-box'),
+            ('p_box', 'Found P-box'),
+            
+            # Data structures
+            ('unsigned char des_key[8]', 'Found DES key array'),
+            ('unsigned long left', 'Found DES block processing'),
+            ('unsigned long right', 'Found DES block processing'),
+            ('[LR]\\d\\s*=', 'Found DES round operation'),
+            
+            # ASM specific
+            (r'(?i)des\s+proc', 'Found DES procedure'),
+            (r'(?i)des\s+segment', 'Found DES segment'),
+            (r'(?i)des_key\s+proc', 'Found DES key procedure'),
+            
+            # Common operations
+            ('feistel', 'Found Feistel network'),
+            ('round_function', 'Found round function'),
+            ('f_function', 'Found F function'),
+            
+            # Specific constants
+            ('28', 'Found potential DES rotation constant'),
+            ('48', 'Found potential DES expansion size'),
+            ('32', 'Found potential DES block half size'),
+            ('56', 'Found potential DES key size')
+        ]
+        
+        # Check patterns
+        for pattern, msg in des_patterns:
+            if pattern in function_text or re.search(pattern, function_text, re.IGNORECASE):
+                evidence.append(msg)
+                score += 1
+        
+        # Check for S-box references
+        if self.find_sbox(function_text)[1] > 0:
+            evidence.append("Found S-box usage in DES context")
+            score += 1
+        
+        # Check for characteristic DES operations
+        if re.search(r'(?i)(rotate|shift|xor)\s*.*\s*(28|56)', function_text):  # DES uses 28-bit rotations
+            evidence.append("Found DES key schedule operations")
+            score += 1
+        
+        # Check for DES-specific bit operations
+        if re.search(r'(?i)(<<|>>|rol|ror)\s*[1-2]', function_text):
+            evidence.append("Found DES bit rotations")
+            score += 1
+        
+        # Check for 16 rounds structure
+        if re.search(r'(?i)for\s*\(\s*\w+\s*=\s*0\s*;\s*\w+\s*<\s*16\s*;', function_text):
+            evidence.append("Found DES round structure")
+            score += 1
+        
+        # Check for permutation tables
+        if re.search(r'(?i)(PC1|PC2|IP|FP|E|P)\s*\[\s*\d+\s*\]', function_text):
+            evidence.append("Found DES permutation tables")
+            score += 1
+
+        if score >= 2:
+            evidence.append("Found DES implementation")
+            score = 2  # Normalize score
+            
+        return evidence, score
+
+    def find_sbox(self, function_text: str) -> tuple[list[str], int]:
+        """Detect S-box implementations"""
+        evidence = []
+        score = 0
+        
+        # S-box patterns
+        sbox_patterns = [
+            # Common S-box declarations
+            (r'(?i)s_?box', 'Found S-box reference'),
+            (r'(?i)sbox\s*\[\s*\d+\s*\]', 'Found S-box array'),
+            (r'(?i)substitution_box', 'Found substitution box'),
+            (r'unsigned\s+char\s+[Ss](?:\d|_box)', 'Found S-box declaration'),
+            
+            # Common sizes
+            (r'\[\s*8\s*\]\s*\[\s*64\s*\]', 'Found DES-like S-box dimensions'),
+            (r'\[\s*256\s*\]', 'Found 256-entry S-box'),
+            (r'\[\s*16\s*\]\s*\[\s*16\s*\]', 'Found AES-like S-box dimensions'),
+            
+            # ASM patterns
+            (r'(?i)sbox\s+segment', 'Found S-box segment'),
+            (r'(?i)sbox\s+proc', 'Found S-box procedure'),
+            (r'(?i)db\s+\d+\s*,\s*\d+\s*,\s*\d+\s*,', 'Found S-box data'),
+            
+            # Lookup operations
+            (r'[Ss](?:\d|_box)\s*\[\s*\w+\s*\]', 'Found S-box lookup'),
+            (r'substitute\s*\(\s*\w+\s*\)', 'Found substitution operation')
+        ]
+        
+        # Check patterns
+        for pattern, msg in sbox_patterns:
+            if re.search(pattern, function_text):
+                evidence.append(msg)
+                score += 1
+        
+        # Check for characteristic S-box content
+        if re.search(r'(?i)(0x[0-9a-f]{2}\s*,\s*){8,}', function_text):
+            evidence.append("Found S-box lookup table")
+            score += 1
+        
+        if score >= 2:
+            evidence.append("Found S-box implementation")
+            score = 2  # Normalize score
+            
+        return evidence, score
+
     def find_crypto_functions(self):
         """Find cryptographic functions in the code"""
         try:
@@ -2537,6 +2670,17 @@ Comments:"""
                         rc4_evidence, rc4_score = self.find_rc4(function_text)
                         evidence.extend(rc4_evidence)
                         score += rc4_score
+
+                        # Check for DES
+                        des_evidence, des_score = self.find_des(function_text)
+                        evidence.extend(des_evidence)
+                        score += des_score
+
+                        # Check for standalone S-box (not part of other algorithms)
+                        sbox_evidence, sbox_score = self.find_sbox(function_text)
+                        if sbox_score > 0 and des_score == 0:  # Only count if not part of DES
+                            evidence.extend(sbox_evidence)
+                            score += sbox_score
 
                         # Keep common crypto implementation features
                         if re.search(r'(?i)(rounds?|iterations?)\s*=\s*\d+', function_text):
