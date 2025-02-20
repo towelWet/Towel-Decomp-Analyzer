@@ -2403,6 +2403,87 @@ Comments:"""
             import traceback
             self.log_message(traceback.format_exc(), error=True)
 
+    def find_rc4(self, function_text: str) -> tuple[list[str], int]:
+        """Detect RC4 implementation in C or ASM"""
+        evidence = []
+        score = 0
+        
+        # C patterns
+        c_patterns = [
+            ('rc4_key', 'Found RC4 key handling'),
+            ('prepare_key', 'Found key preparation'),
+            ('swap_byte', 'Found byte swapping'),
+            ('unsigned char state[256]', 'Found state array'),
+            (r'index[12]\s*=', 'Found index manipulation'),
+            (r'state\[counter\]', 'Found state counter')
+        ]
+        
+        # ASM patterns
+        asm_patterns = [
+            (r'(?i)rc4\s+proc', 'Found RC4 procedure'),
+            (r'(?i)rc4\s+segment', 'Found RC4 segment'),
+            (r'(?i)rc4_key\s+proc', 'Found RC4 key procedure'),
+            (r'(?i)prepare_key\s+proc', 'Found key preparation'),
+            (r'(?i)swap_byte\s+proc', 'Found byte swapping'),
+            (r'(?i)db\s+256\s+dup', 'Found state array'),
+            (r'(?i)xchg\s+.*,\s*.*', 'Found exchange operation'),
+            (r'(?i)mov\s+byte\s+ptr', 'Found byte movement'),
+            (r'(?i)loop\s+\w+', 'Found loop construct')
+        ]
+        
+        # Check C patterns
+        for pattern, msg in c_patterns:
+            if pattern in function_text or re.search(pattern, function_text, re.IGNORECASE):
+                evidence.append(msg)
+                score += 1
+        
+        # Check ASM patterns
+        for pattern, msg in asm_patterns:
+            if re.search(pattern, function_text):
+                evidence.append(msg)
+                score += 1
+        
+        # Additional ASM indicators
+        if 'state' in function_text.lower() and 'index' in function_text.lower():
+            evidence.append("Found state/index usage")
+            score += 1
+        
+        if score >= 2:
+            evidence.append("Found RC4 implementation (C/ASM)")
+            score = 2  # Normalize score
+            
+        return evidence, score
+
+    def find_blowfish(self, content: str) -> tuple[list[str], list[str]]:
+        """Detect Blowfish implementation"""
+        evidence = []
+        findings = []
+        
+        blowfish_indicators = [
+            'Blowfish', 'BLOWFISH', 'blowfish',
+            'unsigned long P[18]', 'unsigned long S[4][256]',
+            'xL', 'xR', 'F(', 'encipher', 'decipher',
+            'decimal', 'checkstack', 'init-boxes'
+        ]
+        
+        for indicator in blowfish_indicators:
+            if indicator in content:
+                evidence.append(f"Found Blowfish indicator: {indicator}")
+        
+        if evidence:
+            findings.append("\n// ==========================================")
+            findings.append("// BLOWFISH IMPLEMENTATION DETECTED")
+            findings.append("// Evidence:")
+            for e in evidence:
+                findings.append(f"// - {e}")
+            findings.append("// ==========================================\n")
+            start_idx = max(0, content.lower().find('blowfish'))
+            end_idx = min(len(content), start_idx + 1000)
+            findings.append(content[start_idx:end_idx])
+            findings.append("\n// =========== END BLOWFISH IMPLEMENTATION ===========\n\n")
+        
+        return evidence, findings
+
     def find_crypto_functions(self):
         """Find cryptographic functions in the code"""
         try:
@@ -2414,52 +2495,28 @@ Comments:"""
             self.log_message("Starting crypto analysis...")
             self.evidence = []  # Reset evidence list
             
+            # Check for Blowfish
+            blowfish_evidence, blowfish_findings = self.find_blowfish(content)
+            self.evidence.extend(blowfish_evidence)
+            crypto_findings = blowfish_findings
+            
             # Split into potential function blocks
             lines = content.split('\n')
             current_function = []
-            crypto_findings = []
             in_function = False
             
-            # First check for Blowfish in entire content
-            blowfish_indicators = [
-                'Blowfish', 'BLOWFISH', 'blowfish',
-                'unsigned long P[18]', 'unsigned long S[4][256]',
-                'xL', 'xR', 'F(', 'encipher', 'decipher',
-                'decimal', 'checkstack', 'init-boxes'
-            ]
-            
-            # If we find Blowfish in the content, add it as a finding immediately
-            blowfish_evidence = []
-            for indicator in blowfish_indicators:
-                if indicator in content:
-                    blowfish_evidence.append(f"Found Blowfish indicator: {indicator}")
-            
-            if blowfish_evidence:
-                crypto_findings.append("\n// ==========================================")
-                crypto_findings.append("// BLOWFISH IMPLEMENTATION DETECTED")
-                crypto_findings.append("// Evidence:")
-                for e in blowfish_evidence:
-                    crypto_findings.append(f"// - {e}")
-                    self.evidence.append(e)
-                crypto_findings.append("// ==========================================\n")
-                # Add the relevant section of the content
-                start_idx = max(0, content.lower().find('blowfish'))
-                end_idx = min(len(content), start_idx + 1000)  # Grab a reasonable chunk
-                crypto_findings.append(content[start_idx:end_idx])
-                crypto_findings.append("\n// =========== END BLOWFISH IMPLEMENTATION ===========\n\n")
-            
-            # Keep existing function analysis logic
+            # Analyze each function
             for line in lines:
                 stripped = line.strip()
                 
-                # Check for function start (keep both function and struct detection)
-                if re.match(r'(?i)(\w+\s+)*(\w+)\s*\([^)]*\)\s*{', stripped) or re.search(r'typedef\s+struct', stripped):
+                # Check for function start
+                if re.match(r'(?i)(\w+\s+)*(\w+)\s*\([^)]*\)\s*{', stripped) or re.search(r'typedef\s+struct', stripped) or re.search(r'(?i)proc\s+|segment\s+', stripped):
                     in_function = True
                     current_function = [line]
                 # Inside function/struct
                 elif in_function:
                     current_function.append(line)
-                    if stripped == '}':
+                    if stripped == '}' or re.search(r'(?i)endp\s*$', stripped):
                         # Analyze complete block
                         function_text = '\n'.join(current_function)
                         evidence = []
@@ -2476,20 +2533,10 @@ Comments:"""
                             evidence.append("Large hexadecimal constants found")
                             score += 1
 
-                        # Keep existing RC4 patterns (working well)
-                        if any([
-                            'rc4_key' in function_text.lower(),
-                            'prepare_key' in function_text,
-                            'swap_byte' in function_text,
-                            'unsigned char state[256]' in function_text,
-                            re.search(r'index[12]\s*=', function_text),
-                            re.search(r'state\[counter\]', function_text)
-                        ]):
-                            evidence.append("Found RC4 stream cipher implementation")
-                            score += 2
-
-                        # Keep all other existing patterns...
-                        # (AES, DES, SERPENT, SHA/SHS, TWOFISH, RSA, ELLIPTIC)
+                        # Check for RC4
+                        rc4_evidence, rc4_score = self.find_rc4(function_text)
+                        evidence.extend(rc4_evidence)
+                        score += rc4_score
 
                         # Keep common crypto implementation features
                         if re.search(r'(?i)(rounds?|iterations?)\s*=\s*\d+', function_text):
@@ -2499,7 +2546,7 @@ Comments:"""
                             evidence.append("Found bit manipulation operations")
                             score += 1
                             
-                        # Keep existing reporting logic...
+                        # Report findings
                         if score >= 2:
                             crypto_findings.append("\n// ==========================================")
                             crypto_findings.append("// SECURITY/CRYPTO FUNCTION DETECTED")
