@@ -74,8 +74,27 @@ Focus on:
 Comment:"""
         }
         
+        # Initialize code patterns 
+        self.code_patterns = {
+            'include': r'#include\s*[<"]([^>"]+)[>"]',
+            'variable_declaration': r'(\w+)\s+(\w+)\s*=\s*(.*?);',
+            'if_statement': r'if\s*\((.*?)\)',
+            'return_statement': r'return\s+(.*?);',
+            'system_call': r'system\s*\("([^"]*)"\)',
+            'assembly': {
+                'instruction': r'^(mov|push|pop|lea|sub|add|xor|and|or|shl|shr|cmp|jmp|j[a-z]{1,4}|call|ret|nop|inc|dec|test)\b',
+                'label': r'^[a-zA-Z_][a-zA-Z0-9_]*:',
+                'directive': r'^(\.|\balign\b|\bdb\b|\bdw\b|\bdd\b|\bdq\b)',
+                'memory': r'\[(.*?)\]',
+                'register': r'\b(e?[abcd]x|[abcd]l|[abcd]h|[er]?[sb]p|[er]?[sd]i|r\d+[dwb]?)\b'
+            }
+        }
+
         # Setup UI first (this will create analyze_btn)
         self.setup_ui()
+        
+        # Enable analyze button immediately for pattern-based analysis
+        self.analyze_btn.config(state='normal')  # Enable by default
         
         # Initialize model in background
         self.model = None
@@ -141,11 +160,11 @@ Comment:"""
                 self.log_message("Running on CPU - this may be slower")
             
             self.log_message("DeepSeek model loaded successfully")
-            self.analyze_btn.config(state='normal')
+            self.use_ai_var.set(True)  # Enable AI after model loads
             
         except Exception as e:
             self.log_message(f"Error loading DeepSeek model: {str(e)}", error=True)
-            self.analyze_btn.config(state='disabled')
+            self.use_ai_var.set(False)  # Disable AI on error
 
     def fine_tune_models(self):
         """Minimal fine-tuning to initialize weights properly"""
@@ -719,19 +738,25 @@ Comment:"""
 
     def _is_assembly_instruction(self, line):
         """Enhanced assembly instruction detection"""
+        if not line:
+            return False
+            
         stripped = line.strip().lower()
         
-        # Common assembly instruction patterns
-        asm_patterns = {
-            r'^(mov|push|pop|lea|sub|add|xor|and|or|shl|shr|cmp|jmp|j[a-z]{1,4}|call|ret|nop)\b',  # Instructions
-            r'^[a-z_][a-z0-9_]*:',  # Labels
-            r'^align\s+\w+',        # Alignment directives
-            r'^db\s+|^dw\s+|^dd\s+|^dq\s+',  # Data definitions
-            r'^(byte|word|dword|qword)\s+ptr',  # Size specifiers
-            r'^[a-z]+\s+[a-z0-9]+\s*,',  # Instructions with operands
-        }
+        # Skip empty lines and comments
+        if not stripped or stripped.startswith(('/', ';', '//')):
+            return False
+            
+        # Handle Ghidra addresses
+        if re.match(r'^[0-9a-f]{8}\s+', stripped):
+            stripped = re.sub(r'^[0-9a-f]{8}\s+(?:[0-9a-f]{2}\s+)*', '', stripped)
         
-        return any(re.match(pattern, stripped) for pattern in asm_patterns)
+        # Check against assembly patterns
+        for pattern in self.code_patterns['assembly'].values():
+            if re.search(pattern, stripped, re.IGNORECASE):
+                return True
+                
+        return False
 
     def browse_file(self):
         """Browse for a file to analyze"""
@@ -754,11 +779,9 @@ Comment:"""
                     self.original_text.delete(1.0, tk.END)
                     self.original_text.insert(1.0, content)
                     
-                    # Just log if it's a findings file, but don't change button state
-                    if "SECURITY/CRYPTO FUNCTION DETECTED" in content or "KEY GENERATION FUNCTION DETECTED" in content:
-                        self.log_message("Loaded existing findings file")
-                    else:
-                        self.log_message("File loaded successfully")
+                    # Always enable analyze button after loading file
+                    self.analyze_btn.config(state='normal')
+                    self.log_message("File loaded successfully")
                     
             except UnicodeDecodeError:
                 # Try different encodings if utf-8 fails
@@ -767,6 +790,7 @@ Comment:"""
                         content = f.read()
                         self.original_text.delete(1.0, tk.END)
                         self.original_text.insert(1.0, content)
+                        self.analyze_btn.config(state='normal')
                         self.log_message("File loaded with alternative encoding")
                 except Exception as e:
                     self.log_message(f"Error loading file: {str(e)}", error=True)
@@ -2678,7 +2702,7 @@ Comments:"""
 
                         # Check for standalone S-box (not part of other algorithms)
                         sbox_evidence, sbox_score = self.find_sbox(function_text)
-                        if sbox_score > 0 and des_score == 0:  # Only count if not part of DES
+                        if (sbox_score > 0 and des_score == 0):  # Only count if not part of DES
                             evidence.extend(sbox_evidence)
                             score += sbox_score
 
