@@ -737,26 +737,119 @@ Comment:"""
         return self.generate_pattern_based_comment(code)
 
     def _is_assembly_instruction(self, line):
-        """Enhanced assembly instruction detection"""
+        """Enhanced assembly instruction detection with IDA/Ghidra support"""
         if not line:
             return False
             
-        stripped = line.strip().lower()
+        # Clean formatted line first
+        stripped = self._clean_ghidra_line(line)
         
         # Skip empty lines and comments
-        if not stripped or stripped.startswith(('/', ';', '//')):
+        if not stripped or stripped.startswith(('/', ';', '//', '.')):
             return False
-            
-        # Handle Ghidra addresses
-        if re.match(r'^[0-9a-f]{8}\s+', stripped):
-            stripped = re.sub(r'^[0-9a-f]{8}\s+(?:[0-9a-f]{2}\s+)*', '', stripped)
         
-        # Check against assembly patterns
-        for pattern in self.code_patterns['assembly'].values():
+        # Check standard assembly patterns
+        patterns = {
+            'instructions': r'^\s*(mov|push|pop|lea|sub|add|xor|and|or|shl|shr|cmp|jmp|j[a-z]{1,4}|call|ret|nop|inc|dec|test|imul|movzx|movsx)\b',
+            'registers': r'\b(r[0-9]+[dwb]?|[er]?[abcd]x|[abcd][hl]|[er]?[sbi]p|[er]?[sd]i|[er]?ip)\b',
+            'memory': r'(?:byte|word|dword|qword)?\s*ptr|[\[\]]'
+        }
+        
+        for pattern in patterns.values():
             if re.search(pattern, stripped, re.IGNORECASE):
                 return True
                 
         return False
+
+    def _clean_ghidra_line(self, line: str) -> str:
+        """Clean Ghidra/IDA formatted line and extract instruction"""
+        # Match IDA format: .text:ADDRESS INSTRUCTION
+        if match := re.match(r'\.[\w\d]+:([0-9a-f]+)\s+(.+)$', line.strip(), re.IGNORECASE):
+            return match.group(2).strip()
+            
+        # Match Ghidra format: [bytes] [address] [instruction]
+        elif match := re.match(r'^([0-9a-f\s]+)?\s*([0-9a-f]{8})?\s*(.+)$', line.strip(), re.IGNORECASE):
+            _, _, instruction = match.groups()
+            return instruction.strip() if instruction else line.strip()
+            
+        return line.strip()
+
+    def _get_instruction_type(self, line: str) -> str:
+        """Get instruction type with Ghidra support"""
+        # Clean Ghidra formatting first
+        line = self._clean_ghidra_line(line)
+        instruction = line.split()[0].lower() if line else ""
+        
+        # Extended instruction map including Ghidra-specific patterns
+        instruction_map = {
+            'mov': 'mov',
+            'push': 'push', 
+            'pop': 'pop',
+            'lea': 'lea',
+            'sub': 'sub',
+            'add': 'add',
+            'xor': 'xor',
+            'imul': 'imul',  # Added for Ghidra
+            'and': 'and',
+            'or': 'or',
+            'shl': 'shl',
+            'shr': 'shr',
+            'cmp': 'cmp',
+            'test': 'test',
+            'jmp': 'jmp',
+            'call': 'call',
+            'ret': 'ret'
+        }
+        
+        return instruction_map.get(instruction) or ('j' if instruction.startswith('j') else None)
+
+    def _get_instruction_comment(self, line: str, inst_type: str) -> str:
+        """Generate comment with IDA/Ghidra support"""
+        # Clean format first
+        line = self._clean_ghidra_line(line)
+        parts = line.split(None, 1)
+        if len(parts) < 2:
+            return "Invalid instruction format"
+        
+        instruction = parts[0].lower()
+        operands = parts[1] if len(parts) > 1 else ""
+        
+        # Split operands and clean
+        op_parts = [p.strip() for p in operands.split(',')]
+        dest = op_parts[0] if op_parts else ""
+        src = op_parts[1] if len(op_parts) > 1 else ""
+        
+        # Enhanced handlers with IDA support
+        handlers = {
+            'mov': lambda: (
+                f"Load {src} into {dest}" if "ptr" in src else
+                f"Store value into {dest}" if "ptr" in dest else
+                f"Copy {src} to {dest}"
+            ),
+            'lea': lambda: f"Calculate effective address of {src} into {dest}",
+            'call': lambda: f"Call function {src or dest}",
+            'sub': lambda: (
+                f"Allocate {src} bytes of stack space" if dest.lower() == "rsp" else
+                f"Subtract {src} from {dest}"
+            ),
+            'add': lambda: (
+                f"Deallocate {src} bytes of stack space" if dest.lower() == "rsp" else
+                f"Add {src} to {dest}"
+            ),
+            'xor': lambda: (
+                f"Zero out {dest}" if dest == src else
+                f"XOR {dest} with {src}"
+            )
+        }
+        
+        if inst_type in handlers:
+            return handlers[inst_type]()
+        elif inst_type == 'j':
+            condition = instruction[1:].upper()
+            target = operands.strip()
+            return f"Jump to {target} if {condition} condition is met"
+            
+        return f"Perform {instruction} operation"
 
     def browse_file(self):
         """Browse for a file to analyze"""
@@ -1305,7 +1398,7 @@ Comment:"""
                 r'(?i)(block.*?cipher|stream.*?cipher)',
             ],
             'hashing': [
-                r'(?i)(hash|digest|SHA|MD5|HMAC)',
+                r'(?i)(hash|digest|SHA|MD5)',
                 r'(?i)(SHA\-?1|SHA\-?2|SHA\-?256|SHA\-?512)',
                 r'(?i)(blake2|keccak|whirlpool)',
             ],
@@ -1907,98 +2000,81 @@ Answer format: YES/NO followed by explanation of security-relevant features foun
         return line
 
     def _get_instruction_type(self, line: str) -> str:
-        """Determine the type of assembly instruction"""
-        line = line.lower().strip()
+        """Get instruction type with Ghidra support"""
+        # Clean Ghidra formatting first
+        line = self._clean_ghidra_line(line)
+        instruction = line.split()[0].lower() if line else ""
         
-        # Common instruction patterns
-        patterns = {
-            'mov': r'^mov\s+',
-            'push': r'^push\s+',
-            'pop': r'^pop\s+',
-            'lea': r'^lea\s+',
-            'xor': r'^xor\s+',
-            'sub': r'^sub\s+',
-            'add': r'^add\s+',
-            'test': r'^test\s+',
-            'cmp': r'^cmp\s+',
-            'jmp': r'^jmp\s+',
-            'j': r'^j[a-z]+\s+',  # Conditional jumps
-            'call': r'^call\s+',
-            'ret': r'^ret\b',
-            'nop': r'^nop\b',
-            'and': r'^and\s+',
-            'or': r'^or\s+',
-            'shl': r'^shl\s+',
-            'shr': r'^shr\s+',
-            'inc': r'^inc\s+',
-            'dec': r'^dec\s+'
+        # Extended instruction map including Ghidra-specific patterns
+        instruction_map = {
+            'mov': 'mov',
+            'push': 'push', 
+            'pop': 'pop',
+            'lea': 'lea',
+            'sub': 'sub',
+            'add': 'add',
+            'xor': 'xor',
+            'imul': 'imul',  # Added for Ghidra
+            'and': 'and',
+            'or': 'or',
+            'shl': 'shl',
+            'shr': 'shr',
+            'cmp': 'cmp',
+            'test': 'test',
+            'jmp': 'jmp',
+            'call': 'call',
+            'ret': 'ret'
         }
         
-        # Check each pattern
-        for inst_type, pattern in patterns.items():
-            if re.match(pattern, line):
-                return inst_type
-                
-        # Check for special cases
-        if re.match(r'^j[a-z]{1,4}\s+', line):  # Conditional jumps (je, jne, jg, etc.)
-            return 'j'
-            
-        return None
+        return instruction_map.get(instruction) or ('j' if instruction.startswith('j') else None)
 
     def _get_instruction_comment(self, line: str, inst_type: str) -> str:
-        """Generate appropriate comment based on instruction type"""
-        parts = line.split(',', 1)
-        operands = parts[1].strip() if len(parts) > 1 else ''
-        dest = parts[0].split(None, 1)[1] if len(parts[0].split()) > 1 else ''
+        """Generate comment with IDA/Ghidra support"""
+        # Clean format first
+        line = self._clean_ghidra_line(line)
+        parts = line.split(None, 1)
+        if len(parts) < 2:
+            return "Invalid instruction format"
         
-        def clean_mem_ref(op):
-            """Clean memory reference for readability"""
-            return op.replace('ptr', '').replace('byte', '').replace('word', '').strip()
+        instruction = parts[0].lower()
+        operands = parts[1] if len(parts) > 1 else ""
         
-        # Instruction-specific handlers
+        # Split operands and clean
+        op_parts = [p.strip() for p in operands.split(',')]
+        dest = op_parts[0] if op_parts else ""
+        src = op_parts[1] if len(op_parts) > 1 else ""
+        
+        # Enhanced handlers with IDA support
         handlers = {
             'mov': lambda: (
-                f"Stores {operands} into {clean_mem_ref(dest)}." if '[' in dest else
-                f"Loads from {clean_mem_ref(operands)} into {dest}." if '[' in operands else
-                f"Copies {operands} to {dest}."
+                f"Load {src} into {dest}" if "ptr" in src else
+                f"Store value into {dest}" if "ptr" in dest else
+                f"Copy {src} to {dest}"
             ),
-            'push': lambda: f"Saves {line.split()[-1]} on stack.",
-            'pop': lambda: f"Restores {line.split()[-1]} from stack.",
-            'lea': lambda: f"Gets address of {clean_mem_ref(operands)} into {dest}.",
-            'xor': lambda: (
-                f"Clears {dest}." if dest == operands.strip() else
-                f"XORs {operands} with {dest}."
-            ),
+            'lea': lambda: f"Calculate effective address of {src} into {dest}",
+            'call': lambda: f"Call function {src or dest}",
             'sub': lambda: (
-                f"Allocates {operands} bytes." if 'rsp' in dest else
-                f"Subtracts {operands} from {dest}."
+                f"Allocate {src} bytes of stack space" if dest.lower() == "rsp" else
+                f"Subtract {src} from {dest}"
             ),
             'add': lambda: (
-                f"Deallocates {operands} bytes." if 'rsp' in dest else
-                f"Adds {operands} to {dest}."
+                f"Deallocate {src} bytes of stack space" if dest.lower() == "rsp" else
+                f"Add {src} to {dest}"
             ),
-            'test': lambda: f"Tests {operands} against {dest}.",
-            'cmp': lambda: f"Compares {dest} with {operands}.",
-            'call': lambda: f"Calls {line.split()[-1].split(';')[0].strip()}.",
-            'jmp': lambda: f"Jumps to {line.split()[-1]}.",
-            'ret': lambda: "Returns from function.",
-            'nop': lambda: "No operation.",
-            'and': lambda: f"Performs AND between {operands} and {dest}.",
-            'or': lambda: f"Performs OR between {operands} and {dest}.",
-            'shl': lambda: f"Shifts {dest} left by {operands}.",
-            'shr': lambda: f"Shifts {dest} right by {operands}.",
-            'inc': lambda: f"Increments {dest}.",
-            'dec': lambda: f"Decrements {dest}."
+            'xor': lambda: (
+                f"Zero out {dest}" if dest == src else
+                f"XOR {dest} with {src}"
+            )
         }
         
-        # Get comment from handler or generate conditional jump comment
         if inst_type in handlers:
             return handlers[inst_type]()
         elif inst_type == 'j':
-            condition = line.split()[0][1:].upper()  # Extract condition from jump instruction
-            return f"Jumps to {line.split()[-1]} if {condition} condition is met."
-        
-        return "Performs specified operation."
+            condition = instruction[1:].upper()
+            target = operands.strip()
+            return f"Jump to {target} if {condition} condition is met"
+            
+        return f"Perform {instruction} operation"
 
     def _generate_fallback_comment(self, line):
         """Generate comment using AI with strict validation"""
@@ -2757,5 +2833,5 @@ def main():
         print("Parallel processing test passed!")
     root.mainloop()
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # Use == instead of ": "
     main()
