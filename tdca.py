@@ -208,6 +208,11 @@ Comment:"""
         self.use_gpu_var = tk.BooleanVar(value=True)
         self.show_confidence_var = tk.BooleanVar(value=False)
         self.use_ai_var = tk.BooleanVar(value=False)  # Default to fast mode
+        self.search_vars = {
+            'original': tk.StringVar(),
+            'commented': tk.StringVar(),
+            'crypto': tk.StringVar()
+        }
         
         # Configure main window grid
         self.grid_rowconfigure(3, weight=1)
@@ -259,9 +264,12 @@ Comment:"""
         # Search frame for original code
         search_frame = ttk.Frame(original_frame)
         search_frame.pack(fill=tk.X, padx=5, pady=2)
-        ttk.Entry(search_frame).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
-        ttk.Button(search_frame, text="Find").pack(side=tk.LEFT, padx=2)
-        ttk.Button(search_frame, text="Next").pack(side=tk.LEFT, padx=2)
+        self.original_search_entry = ttk.Entry(search_frame, textvariable=self.search_vars['original'])
+        self.original_search_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
+        ttk.Button(search_frame, text="Find",
+                   command=lambda: self.find_text(self.original_text, self.search_vars['original'].get())).pack(side=tk.LEFT, padx=2)
+        ttk.Button(search_frame, text="Next",
+                   command=lambda: self.find_text(self.original_text, self.search_vars['original'].get(), next=True)).pack(side=tk.LEFT, padx=2)
         
         self.original_text = scrolledtext.ScrolledText(original_frame)
         self.original_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
@@ -273,9 +281,12 @@ Comment:"""
         # Search frame for commented code
         search_frame = ttk.Frame(commented_frame)
         search_frame.pack(fill=tk.X, padx=5, pady=2)
-        ttk.Entry(search_frame).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
-        ttk.Button(search_frame, text="Find").pack(side=tk.LEFT, padx=2)
-        ttk.Button(search_frame, text="Next").pack(side=tk.LEFT, padx=2)
+        self.commented_search_entry = ttk.Entry(search_frame, textvariable=self.search_vars['commented'])
+        self.commented_search_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
+        ttk.Button(search_frame, text="Find",
+                   command=lambda: self.find_text(self.commented_text, self.search_vars['commented'].get())).pack(side=tk.LEFT, padx=2)
+        ttk.Button(search_frame, text="Next",
+                   command=lambda: self.find_text(self.commented_text, self.search_vars['commented'].get(), next=True)).pack(side=tk.LEFT, padx=2)
         
         self.commented_text = scrolledtext.ScrolledText(commented_frame)
         self.commented_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
@@ -288,14 +299,13 @@ Comment:"""
         crypto_search_frame = ttk.Frame(crypto_frame)
         crypto_search_frame.grid(row=0, column=0, sticky='ew', padx=5, pady=2)
         
-        self.crypto_search_var = tk.StringVar()
-        self.crypto_search_entry = ttk.Entry(crypto_search_frame, textvariable=self.crypto_search_var)
+        self.crypto_search_entry = ttk.Entry(crypto_search_frame, textvariable=self.search_vars['crypto'])
         self.crypto_search_entry.grid(row=0, column=0, sticky='ew', padx=2)
         
         ttk.Button(crypto_search_frame, text="Find",
-                   command=lambda: self.find_text(self.crypto_text, self.crypto_search_var.get())).grid(row=0, column=1, padx=2)
+                   command=lambda: self.find_text(self.crypto_text, self.search_vars['crypto'].get())).grid(row=0, column=1, padx=2)
         ttk.Button(crypto_search_frame, text="Next",
-                   command=lambda: self.find_text(self.crypto_text, self.crypto_search_var.get(), next=True)).grid(row=0, column=2, padx=2)
+                   command=lambda: self.find_text(self.crypto_text, self.search_vars['crypto'].get(), next=True)).grid(row=0, column=2, padx=2)
         crypto_search_frame.grid_columnconfigure(0, weight=1)
         
         # Crypto text area
@@ -750,7 +760,7 @@ Comment:"""
         
         # Check standard assembly patterns
         patterns = {
-            'instructions': r'^\s*(mov|push|pop|lea|sub|add|xor|and|or|shl|shr|cmp|jmp|j[a-z]{1,4}|call|ret|nop|inc|dec|test|imul|movzx|movsx)\b',
+            'instructions': r'^\s*(mov|push|pop|lea|call|ret|jmp|xor|and|or|shl|shr|rol|ror)\b',
             'registers': r'\b(r[0-9]+[dwb]?|[er]?[abcd]x|[abcd][hl]|[er]?[sbi]p|[er]?[sd]i|[er]?ip)\b',
             'memory': r'(?:byte|word|dword|qword)?\s*ptr|[\[\]]'
         }
@@ -1762,9 +1772,12 @@ Answer format: YES/NO followed by explanation of security-relevant features foun
         entry_widget.select_range(0, tk.END)
 
     def find_text(self, text_widget, search_text, next=False):
-        """Find text in the specified text widget"""
+        """Enhanced find text in the specified text widget"""
         if not search_text:
             return
+        
+        # Remove previous highlighting
+        text_widget.tag_remove('search', '1.0', tk.END)
         
         # Start from next position if continuing search
         if not hasattr(text_widget, 'last_search_pos') or not next:
@@ -1773,9 +1786,8 @@ Answer format: YES/NO followed by explanation of security-relevant features foun
         # Find the text
         pos = text_widget.search(search_text, text_widget.last_search_pos, tk.END, nocase=True)
         if pos:
-            # Select the found text
+            # Select and highlight the found text
             line_end = f"{pos}+{len(search_text)}c"
-            text_widget.tag_remove('search', '1.0', tk.END)
             text_widget.tag_add('search', pos, line_end)
             text_widget.tag_config('search', background='yellow')
             text_widget.see(pos)
@@ -2697,7 +2709,7 @@ Comments:"""
             
             # Lookup operations
             (r'[Ss](?:\d|_box)\s*\[\s*\w+\s*\]', 'Found S-box lookup'),
-            (r'substitute\s*\(\s*\w+\s*\)', 'Found substitution operation')
+            (r'substitute\s*\(\s*\w+\\s*\)', 'Found substitution operation')
         ]
         
         # Check patterns
